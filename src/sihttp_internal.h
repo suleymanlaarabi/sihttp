@@ -76,6 +76,7 @@ struct sihttp_server_s {
     int listen_fd;
     uint16_t port;
     int backlog;
+    int max_requests_per_poll;
     int running;
 };
 

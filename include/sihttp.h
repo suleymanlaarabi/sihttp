@@ -71,11 +71,13 @@ typedef struct {
 /* Server configuration.
  * state is owned by the user and must outlive the server.
  * port 0 lets the OS choose a port; backlog uses a library default when set to 0.
+ * max_requests_per_poll limits per-frame work; 0 uses a library default.
  */
 typedef struct {
     int port;
     sihttp_app_state_t *state;
     int backlog;
+    int max_requests_per_poll;
 } sihttp_server_desc_t;
 
 /* Server lifecycle. */
@@ -86,6 +88,8 @@ SIHTTP_API void sihttp_server_fini(sihttp_server_t *server);
 
 /* Server runtime. host may be NULL to bind all IPv4 interfaces. */
 SIHTTP_API int sihttp_server_listen(sihttp_server_t *server, const char *host, uint16_t port);
+SIHTTP_API int sihttp_server_start(sihttp_server_t *server);
+SIHTTP_API int sihttp_server_poll(sihttp_server_t *server);
 SIHTTP_API int sihttp_server_run(sihttp_server_t *server);
 SIHTTP_API void sihttp_server_stop(sihttp_server_t *server);
 SIHTTP_API uint16_t sihttp_server_port(const sihttp_server_t *server);

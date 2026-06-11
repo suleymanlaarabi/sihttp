@@ -29,6 +29,8 @@ void response_json_content_type(void);
 // Testsuite 'server'
 void server_config(void);
 void server_socket_roundtrip(void);
+void server_poll_idle(void);
+void server_poll_roundtrip(void);
 void server_not_found(void);
 
 bake_test_case siformat_testcases[] = {
@@ -93,6 +95,14 @@ bake_test_case server_testcases[] = {
         server_socket_roundtrip
     },
     {
+        "poll_idle",
+        server_poll_idle
+    },
+    {
+        "poll_roundtrip",
+        server_poll_roundtrip
+    },
+    {
         "not_found",
         server_not_found
     }
@@ -132,7 +142,7 @@ static bake_test_suite suites[] = {
         "server",
         NULL,
         NULL,
-        3,
+        5,
         server_testcases
     }
 };

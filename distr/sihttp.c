@@ -92,6 +92,7 @@ struct sihttp_server_s {
     int listen_fd;
     uint16_t port;
     int backlog;
+    int max_requests_per_poll;
     int running;
 };
 
@@ -118,6 +119,7 @@ struct sihttp_route_table_s {
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -151,7 +153,22 @@ static char *sihttp_static_body(const char *body) {
 
 enum {
     SIHTTP_DEFAULT_BACKLOG = 128,
+    SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL = 64,
 };
+
+static int sihttp_set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags == -1) {
+        return -1;
+    }
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        return -1;
+    }
+
+    return 0;
+}
 
 static sihttp_response_t sihttp_error_response(int status, const char *body) {
     return (sihttp_response_t){ .status = status, .body = sihttp_static_body(body) };
@@ -161,6 +178,7 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     sihttp_server_t *server;
     int port = 0;
     int backlog = SIHTTP_DEFAULT_BACKLOG;
+    int max_requests_per_poll = SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL;
 
     if (desc) {
         if (desc->port < 0 || desc->port > UINT16_MAX) {
@@ -169,6 +187,9 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
         }
         port = desc->port;
         backlog = desc->backlog > 0 ? desc->backlog : SIHTTP_DEFAULT_BACKLOG;
+        max_requests_per_poll = desc->max_requests_per_poll > 0
+            ? desc->max_requests_per_poll
+            : SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL;
     }
 
     server = calloc(1, sizeof(*server));
@@ -187,6 +208,7 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     sihttp_route_table_init(server->routes);
     server->port = (uint16_t)port;
     server->backlog = backlog;
+    server->max_requests_per_poll = max_requests_per_poll;
     if (desc) {
         server->state = desc->state;
     }
@@ -371,6 +393,69 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
     return status == 200 ? 0 : -1;
 }
 
+SIHTTP_API int sihttp_server_start(sihttp_server_t *server) {
+    if (!server) {
+        sihttp_set_error("server is NULL");
+        return -1;
+    }
+
+    if (server->listen_fd == -1 && sihttp_server_listen(server, NULL, server->port) != 0) {
+        return -1;
+    }
+
+    if (sihttp_set_nonblocking(server->listen_fd) != 0) {
+        sihttp_set_error("could not make server socket non-blocking: %s", strerror(errno));
+        return -1;
+    }
+
+    server->running = 1;
+    return 0;
+}
+
+SIHTTP_API int sihttp_server_poll(sihttp_server_t *server) {
+    int handled = 0;
+
+    if (!server) {
+        sihttp_set_error("server is NULL");
+        return -1;
+    }
+
+    if (!server->running && sihttp_server_start(server) != 0) {
+        return -1;
+    }
+
+    while (handled < server->max_requests_per_poll) {
+        int client_fd = accept(server->listen_fd, NULL, NULL);
+
+        if (client_fd == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return handled;
+            }
+            if (!server->running || server->listen_fd == -1 || errno == EBADF || errno == EINVAL) {
+                return handled;
+            }
+
+            sihttp_set_error("accept failed: %s", strerror(errno));
+            return -1;
+        }
+
+        if (sihttp_set_nonblocking(client_fd) != 0) {
+            sihttp_set_error("could not make client socket non-blocking: %s", strerror(errno));
+            close(client_fd);
+            return -1;
+        }
+
+        sihttp_server_handle_client(server, client_fd);
+        close(client_fd);
+        handled++;
+    }
+
+    return handled;
+}
+
 SIHTTP_API int sihttp_server_run(sihttp_server_t *server) {
     if (!server) {
         sihttp_set_error("server is NULL");
@@ -386,6 +471,9 @@ SIHTTP_API int sihttp_server_run(sihttp_server_t *server) {
         int client_fd = accept(server->listen_fd, NULL, NULL);
         if (client_fd == -1) {
             if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 continue;
             }
             if (!server->running || server->listen_fd == -1 || errno == EBADF || errno == EINVAL) {

@@ -47,6 +47,8 @@
         "testcases": [
           "config",
           "socket_roundtrip",
+          "poll_idle",
+          "poll_roundtrip",
           "not_found"
         ]
       }
