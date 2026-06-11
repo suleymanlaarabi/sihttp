@@ -1,0 +1,6 @@
+#include "../../src/sihttp_buffer.c"
+#include "../../src/sihttp_request.c"
+#include "../../src/sihttp_response.c"
+#include "../../src/sihttp_route.c"
+#include "../../src/sihttp.c"
+#include "../../src/siformat.c"

@@ -1,0 +1,54 @@
+{
+  "id": "sihttp.test",
+  "type": "application",
+  "value": {
+    "public": false,
+    "clangd": true,
+    "use": ["sijson", "sireflect"]
+  },
+  "lang.c": {
+    "c-standard": "c23",
+    "include": ["../include", "../src"]
+  },
+  "test": {
+    "testsuites": [
+      {
+        "id": "siformat",
+        "testcases": [
+          "basic",
+          "empty"
+        ]
+      },
+      {
+        "id": "request",
+        "testcases": [
+          "parse_get_query",
+          "parse_post_body"
+        ]
+      },
+      {
+        "id": "route",
+        "testcases": [
+          "exact",
+          "param",
+          "method_not_allowed"
+        ]
+      },
+      {
+        "id": "response",
+        "testcases": [
+          "default_status",
+          "custom_status"
+        ]
+      },
+      {
+        "id": "server",
+        "testcases": [
+          "config",
+          "socket_roundtrip",
+          "not_found"
+        ]
+      }
+    ]
+  }
+}
