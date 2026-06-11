@@ -66,6 +66,15 @@ typedef struct sihttp_server_s sihttp_server_t;
  */
 typedef struct sihttp_app_state_s sihttp_app_state_t;
 
+/* Response content type. AUTO defaults to text/plain for string bodies. */
+typedef enum {
+    SIHTTP_CONTENT_AUTO = 0,
+    SIHTTP_CONTENT_TEXT,
+    SIHTTP_CONTENT_JSON,
+    SIHTTP_CONTENT_HTML,
+    SIHTTP_CONTENT_BINARY,
+} sihttp_content_type_t;
+
 /* Handler response.
  * status defaults to 200 when set to 0.
  * body must be heap-allocated; the server takes ownership and frees it.
@@ -73,6 +82,7 @@ typedef struct sihttp_app_state_s sihttp_app_state_t;
 typedef struct {
     int status;
     char *body;
+    sihttp_content_type_t content_type;
 } sihttp_response_t;
 
 /* Incoming HTTP request passed to route handlers. */

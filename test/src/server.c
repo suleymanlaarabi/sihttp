@@ -61,6 +61,7 @@ void server_socket_roundtrip(void) {
     char *response = server_request(server, "GET /users/34 HTTP/1.1\r\nHost: localhost\r\n\r\n");
     test_assert(strstr(response, "HTTP/1.1 200 OK\r\n") == response);
     test_assert(strstr(response, "Content-Length: 14\r\n") != NULL);
+    test_assert(strstr(response, "Content-Type: text/plain; charset=utf-8\r\n") != NULL);
     test_assert(strstr(response, "\r\n\r\nuser=34 base=8") != NULL);
 
     free(response);
@@ -74,6 +75,7 @@ void server_not_found(void) {
     char *response = server_request(server, "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
     test_assert(strstr(response, "HTTP/1.1 404 Not Found\r\n") == response);
     test_assert(strstr(response, "Content-Length: 0\r\n") != NULL);
+    test_assert(strstr(response, "Content-Type: text/plain; charset=utf-8\r\n") != NULL);
 
     free(response);
     sihttp_server_fini(server);

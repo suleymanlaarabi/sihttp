@@ -24,6 +24,7 @@ void route_method_not_allowed(void);
 // Testsuite 'response'
 void response_default_status(void);
 void response_custom_status(void);
+void response_json_content_type(void);
 
 // Testsuite 'server'
 void server_config(void);
@@ -75,6 +76,10 @@ bake_test_case response_testcases[] = {
     {
         "custom_status",
         response_custom_status
+    },
+    {
+        "json_content_type",
+        response_json_content_type
     }
 };
 
@@ -120,7 +125,7 @@ static bake_test_suite suites[] = {
         "response",
         NULL,
         NULL,
-        2,
+        3,
         response_testcases
     },
     {

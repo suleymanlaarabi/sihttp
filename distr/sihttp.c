@@ -903,6 +903,22 @@ static const char *sihttp_status_reason(int status) {
     return status >= 200 && status < 300 ? "OK" : "Error";
 }
 
+static const char *sihttp_content_type_name(sihttp_content_type_t content_type) {
+    switch (content_type) {
+    case SIHTTP_CONTENT_AUTO:
+    case SIHTTP_CONTENT_TEXT:
+        return "text/plain; charset=utf-8";
+    case SIHTTP_CONTENT_JSON:
+        return "application/json";
+    case SIHTTP_CONTENT_HTML:
+        return "text/html; charset=utf-8";
+    case SIHTTP_CONTENT_BINARY:
+        return "application/octet-stream";
+    }
+
+    return "text/plain; charset=utf-8";
+}
+
 static int sihttp_send_all(int fd, const char *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -919,6 +935,7 @@ static int sihttp_send_all(int fd, const char *data, size_t len) {
 char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     int status = response.status == 0 ? 200 : response.status;
     const char *reason = sihttp_status_reason(status);
+    const char *content_type = sihttp_content_type_name(response.content_type);
     const char *body = response.body ? response.body : "";
     size_t body_len = response.body ? strlen(response.body) : 0;
     int header_len;
@@ -928,10 +945,11 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     header_len = snprintf(
         NULL,
         0,
-        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
         status,
         reason,
-        body_len
+        body_len,
+        content_type
     );
     if (header_len < 0) {
         return NULL;
@@ -946,10 +964,11 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     snprintf(
         message,
         (size_t)header_len + 1,
-        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
         status,
         reason,
-        body_len
+        body_len,
+        content_type
     );
     memcpy(message + header_len, body, body_len);
     message[total] = '\0';

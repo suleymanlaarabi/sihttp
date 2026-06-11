@@ -10,7 +10,7 @@ void siformat_basic(void) {
 }
 
 void siformat_empty(void) {
-    char *str = siformat("");
+    char *str = siformat("%s", "");
     test_not_null(str);
     test_str(str, "");
     free(str);

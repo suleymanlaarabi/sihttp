@@ -38,7 +38,8 @@
         "id": "response",
         "testcases": [
           "default_status",
-          "custom_status"
+          "custom_status",
+          "json_content_type"
         ]
       },
       {
