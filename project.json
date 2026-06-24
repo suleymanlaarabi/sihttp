@@ -5,11 +5,6 @@
     "author": "Suleyman Laarabi",
     "description": "easy to use http framework in c",
     "clangd": true,
-    "amalgamate": [
-      {
-        "path": "distr"
-      }
-    ],
     "use": ["sireflect", "sijson"]
   },
   "bundle": {
