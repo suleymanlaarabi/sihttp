@@ -144,3 +144,24 @@ void server_not_found(void) {
     free(response);
     sihttp_server_fini(server);
 }
+
+void server_cors_preflight(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+
+    char *response = server_request(
+        server,
+        "OPTIONS /entities HTTP/1.1\r\n"
+        "Host: localhost\r\n"
+        "Origin: http://localhost:5173\r\n"
+        "Access-Control-Request-Method: POST\r\n"
+        "\r\n"
+    );
+    test_assert(strstr(response, "HTTP/1.1 204 No Content\r\n") == response);
+    test_assert(strstr(response, "Content-Length: 0\r\n") != NULL);
+    test_assert(strstr(response, "Access-Control-Allow-Origin: *\r\n") != NULL);
+    test_assert(strstr(response, "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n") != NULL);
+
+    free(response);
+    sihttp_server_fini(server);
+}

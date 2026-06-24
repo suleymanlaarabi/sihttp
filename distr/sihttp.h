@@ -101,6 +101,7 @@ typedef enum {
     SIHTTP_METHOD_POST,
     SIHTTP_METHOD_PUT,
     SIHTTP_METHOD_DELETE,
+    SIHTTP_METHOD_OPTIONS,
 } sihttp_method_t;
 
 /* Route descriptor used by sihttp_route. */

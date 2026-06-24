@@ -174,6 +174,10 @@ static sihttp_response_t sihttp_error_response(int status, const char *body) {
     return (sihttp_response_t){ .status = status, .body = sihttp_static_body(body) };
 }
 
+static sihttp_response_t sihttp_preflight_response(void) {
+    return (sihttp_response_t){ .status = 204, .body = sihttp_static_body("") };
+}
+
 SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc) {
     sihttp_server_t *server;
     int port = 0;
@@ -366,6 +370,13 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
         sihttp_request_internal_fini(&req);
         sihttp_buffer_fini(&buffer);
         return -1;
+    }
+
+    if (method == SIHTTP_METHOD_OPTIONS) {
+        sihttp_send_response(client_fd, sihttp_preflight_response());
+        sihttp_request_internal_fini(&req);
+        sihttp_buffer_fini(&buffer);
+        return 0;
     }
 
     handler = sihttp_route_table_match(
@@ -749,6 +760,8 @@ const char *sihttp_method_name(sihttp_method_t method) {
         return "PUT";
     case SIHTTP_METHOD_DELETE:
         return "DELETE";
+    case SIHTTP_METHOD_OPTIONS:
+        return "OPTIONS";
     }
 
     return "GET";
@@ -770,6 +783,10 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
     if (strcmp(method, "DELETE") == 0) {
         *ok = 1;
         return SIHTTP_METHOD_DELETE;
+    }
+    if (strcmp(method, "OPTIONS") == 0) {
+        *ok = 1;
+        return SIHTTP_METHOD_OPTIONS;
     }
 
     *ok = 0;
@@ -1027,7 +1044,14 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     header_len = snprintf(
         NULL,
         0,
-        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Content-Type: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Connection: close\r\n"
+        "\r\n",
         status,
         reason,
         body_len,
@@ -1046,7 +1070,14 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     snprintf(
         message,
         (size_t)header_len + 1,
-        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Content-Type: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Connection: close\r\n"
+        "\r\n",
         status,
         reason,
         body_len,
@@ -1225,3 +1256,4 @@ sihttp_handler_t sihttp_route_table_match(
 
     return NULL;
 }
+

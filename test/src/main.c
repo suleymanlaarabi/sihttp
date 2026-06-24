@@ -25,6 +25,7 @@ void route_method_not_allowed(void);
 void response_default_status(void);
 void response_custom_status(void);
 void response_json_content_type(void);
+void response_cors_headers(void);
 
 // Testsuite 'server'
 void server_config(void);
@@ -32,6 +33,7 @@ void server_socket_roundtrip(void);
 void server_poll_idle(void);
 void server_poll_roundtrip(void);
 void server_not_found(void);
+void server_cors_preflight(void);
 
 bake_test_case siformat_testcases[] = {
     {
@@ -82,6 +84,10 @@ bake_test_case response_testcases[] = {
     {
         "json_content_type",
         response_json_content_type
+    },
+    {
+        "cors_headers",
+        response_cors_headers
     }
 };
 
@@ -105,6 +111,10 @@ bake_test_case server_testcases[] = {
     {
         "not_found",
         server_not_found
+    },
+    {
+        "cors_preflight",
+        server_cors_preflight
     }
 };
 
@@ -135,14 +145,14 @@ static bake_test_suite suites[] = {
         "response",
         NULL,
         NULL,
-        3,
+        4,
         response_testcases
     },
     {
         "server",
         NULL,
         NULL,
-        5,
+        6,
         server_testcases
     }
 };

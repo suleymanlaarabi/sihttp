@@ -59,6 +59,10 @@ static sihttp_response_t sihttp_error_response(int status, const char *body) {
     return (sihttp_response_t){ .status = status, .body = sihttp_static_body(body) };
 }
 
+static sihttp_response_t sihttp_preflight_response(void) {
+    return (sihttp_response_t){ .status = 204, .body = sihttp_static_body("") };
+}
+
 SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc) {
     sihttp_server_t *server;
     int port = 0;
@@ -251,6 +255,13 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
         sihttp_request_internal_fini(&req);
         sihttp_buffer_fini(&buffer);
         return -1;
+    }
+
+    if (method == SIHTTP_METHOD_OPTIONS) {
+        sihttp_send_response(client_fd, sihttp_preflight_response());
+        sihttp_request_internal_fini(&req);
+        sihttp_buffer_fini(&buffer);
+        return 0;
     }
 
     handler = sihttp_route_table_match(

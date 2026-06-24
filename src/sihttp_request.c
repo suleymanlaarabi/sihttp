@@ -149,6 +149,8 @@ const char *sihttp_method_name(sihttp_method_t method) {
         return "PUT";
     case SIHTTP_METHOD_DELETE:
         return "DELETE";
+    case SIHTTP_METHOD_OPTIONS:
+        return "OPTIONS";
     }
 
     return "GET";
@@ -170,6 +172,10 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
     if (strcmp(method, "DELETE") == 0) {
         *ok = 1;
         return SIHTTP_METHOD_DELETE;
+    }
+    if (strcmp(method, "OPTIONS") == 0) {
+        *ok = 1;
+        return SIHTTP_METHOD_OPTIONS;
     }
 
     *ok = 0;

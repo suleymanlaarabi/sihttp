@@ -74,7 +74,14 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     header_len = snprintf(
         NULL,
         0,
-        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Content-Type: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Connection: close\r\n"
+        "\r\n",
         status,
         reason,
         body_len,
@@ -93,7 +100,14 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     snprintf(
         message,
         (size_t)header_len + 1,
-        "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Content-Type: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Connection: close\r\n"
+        "\r\n",
         status,
         reason,
         body_len,

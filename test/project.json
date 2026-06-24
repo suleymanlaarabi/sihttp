@@ -39,7 +39,8 @@
         "testcases": [
           "default_status",
           "custom_status",
-          "json_content_type"
+          "json_content_type",
+          "cors_headers"
         ]
       },
       {
@@ -49,7 +50,8 @@
           "socket_roundtrip",
           "poll_idle",
           "poll_roundtrip",
-          "not_found"
+          "not_found",
+          "cors_preflight"
         ]
       }
     ]
