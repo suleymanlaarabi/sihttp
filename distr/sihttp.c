@@ -442,12 +442,6 @@ SIHTTP_API int sihttp_server_poll(sihttp_server_t *server) {
             return -1;
         }
 
-        if (sihttp_set_nonblocking(client_fd) != 0) {
-            sihttp_set_error("could not make client socket non-blocking: %s", strerror(errno));
-            close(client_fd);
-            return -1;
-        }
-
         sihttp_server_handle_client(server, client_fd);
         close(client_fd);
         handled++;
@@ -1231,4 +1225,3 @@ sihttp_handler_t sihttp_route_table_match(
 
     return NULL;
 }
-
