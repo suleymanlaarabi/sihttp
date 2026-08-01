@@ -3,7 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#define MSG_NOSIGNAL 0
+#else
 #include <sys/socket.h>
+#endif
 
 static const char *sihttp_status_reason(int status) {
     switch (status) {

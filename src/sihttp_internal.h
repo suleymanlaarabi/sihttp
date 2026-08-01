@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef _WIN32
+typedef int ssize_t;
+#endif
+
 #define SIHTTP_MAX_HEADER_BYTES (16u * 1024u)
 #define SIHTTP_MAX_BODY_BYTES (1024u * 1024u)
 #define SIHTTP_MAX_HEADERS 64u

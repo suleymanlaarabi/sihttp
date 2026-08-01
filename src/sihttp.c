@@ -2,16 +2,39 @@
 #include "sihttp_internal.h"
 #include "sihttp_route.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+#define close closesocket
+#define MSG_NOSIGNAL 0
+#define ssize_t int
+#define socklen_t int
+#undef errno
+#undef EINTR
+#undef EAGAIN
+#undef EWOULDBLOCK
+#undef EBADF
+#undef EINVAL
+#define errno WSAGetLastError()
+#define EINTR WSAEINTR
+#define EAGAIN WSAEWOULDBLOCK
+#define EWOULDBLOCK WSAEWOULDBLOCK
+#define EBADF WSAEBADF
+#define EINVAL WSAEINVAL
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 static char sihttp_error_buffer[256];
 
@@ -42,6 +65,10 @@ enum {
 };
 
 static int sihttp_set_nonblocking(int fd) {
+#ifdef _WIN32
+    u_long mode = 1;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+#else
     int flags = fcntl(fd, F_GETFL, 0);
 
     if (flags == -1) {
@@ -53,6 +80,7 @@ static int sihttp_set_nonblocking(int fd) {
     }
 
     return 0;
+#endif
 }
 
 static sihttp_response_t sihttp_error_response(int status, const char *body) {
@@ -69,6 +97,16 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     int backlog = SIHTTP_DEFAULT_BACKLOG;
     int max_requests_per_poll = SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL;
 
+#ifdef _WIN32
+    {
+        WSADATA wsa_data;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+            sihttp_set_error("WSAStartup failed");
+            return NULL;
+        }
+    }
+#endif
+
     if (desc) {
         if (desc->port < 0 || desc->port > UINT16_MAX) {
             sihttp_set_error("invalid server port: %d", desc->port);
@@ -83,6 +121,9 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
 
     server = calloc(1, sizeof(*server));
     if (!server) {
+#ifdef _WIN32
+        WSACleanup();
+#endif
         sihttp_set_error("out of memory");
         return NULL;
     }
@@ -90,6 +131,9 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     server->routes = malloc(sizeof(*server->routes));
     if (!server->routes) {
         free(server);
+#ifdef _WIN32
+        WSACleanup();
+#endif
         sihttp_set_error("out of memory");
         return NULL;
     }
@@ -114,6 +158,9 @@ SIHTTP_API void sihttp_server_fini(sihttp_server_t *server) {
     sihttp_route_table_fini(server->routes);
     free(server->routes);
     free(server);
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 SIHTTP_API int sihttp_server_listen(sihttp_server_t *server, const char *host, uint16_t port) {
@@ -138,7 +185,7 @@ SIHTTP_API int sihttp_server_listen(sihttp_server_t *server, const char *host, u
         return -1;
     }
 
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof(yes));
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -188,7 +235,7 @@ SIHTTP_API void sihttp_server_stop(sihttp_server_t *server) {
     if (server->listen_fd != -1) {
         int fd = server->listen_fd;
         server->listen_fd = -1;
-        shutdown(fd, SHUT_RDWR);
+        shutdown(fd, SD_BOTH);
         close(fd);
     }
 }
