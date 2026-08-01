@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: bake ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            compiler_package: clang-18
+            cc: clang-18
+          - os: macos-latest
+            compiler_package: clang
+            cc: clang
+          - os: windows-2022
+            compiler_package: clang-cl
+            cc: clang-cl
+
+    env:
+      CC: ${{ matrix.cc }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.compiler_package }}
+
+      - name: Setup MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install bake (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          git clone https://github.com/SanderMertens/bake
+          make -C bake/build-$(uname)
+          bake/bake setup
+
+      - name: Install bake (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone https://github.com/SanderMertens/bake
+          Push-Location bake/build-Windows
+          nmake /NOLOGO /F bake.mak clean all
+          Pop-Location
+          & "$env:GITHUB_WORKSPACE\bake\bake.exe" setup --local
+          "$env:USERPROFILE\bake" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:USERPROFILE\bake\bake.exe" export CC=clang-cl
+
+      - name: Build library
+        run: bake rebuild . -r
+
+      - name: Build tests
+        run: bake rebuild test -r
+
+      - name: Run tests
+        run: bake run test

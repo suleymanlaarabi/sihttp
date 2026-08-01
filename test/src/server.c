@@ -1,12 +1,20 @@
 #include "sihttp_internal.h"
 #include <test.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define close closesocket
+#define SHUT_WR SD_SEND
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
+
+#include <stdlib.h>
+#include <string.h>
 
 struct sihttp_app_state_s {
     int base;
@@ -18,9 +26,59 @@ static sihttp_response_t server_user(const sihttp_request_t *req) {
     );
 }
 
+static int server_socketpair(int fds[2]) {
+#ifdef _WIN32
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, 0);
+    SOCKET client = INVALID_SOCKET;
+    SOCKET server = INVALID_SOCKET;
+    struct sockaddr_in address;
+    int address_len = sizeof(address);
+    int yes = 1;
+
+    if (listener == INVALID_SOCKET) {
+        return -1;
+    }
+    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof(yes));
+
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(0);
+    if (bind(listener, (const struct sockaddr *)&address, sizeof(address)) == SOCKET_ERROR ||
+        listen(listener, 1) == SOCKET_ERROR ||
+        getsockname(listener, (struct sockaddr *)&address, &address_len) == SOCKET_ERROR) {
+        closesocket(listener);
+        return -1;
+    }
+
+    client = socket(AF_INET, SOCK_STREAM, 0);
+    if (client == INVALID_SOCKET ||
+        connect(client, (const struct sockaddr *)&address, sizeof(address)) == SOCKET_ERROR) {
+        if (client != INVALID_SOCKET) {
+            closesocket(client);
+        }
+        closesocket(listener);
+        return -1;
+    }
+
+    server = accept(listener, NULL, NULL);
+    closesocket(listener);
+    if (server == INVALID_SOCKET) {
+        closesocket(client);
+        return -1;
+    }
+
+    fds[0] = (int)client;
+    fds[1] = (int)server;
+    return 0;
+#else
+    return socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+#endif
+}
+
 static char *server_request(sihttp_server_t *server, const char *request) {
     int fds[2];
-    test_int(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    test_int(server_socketpair(fds), 0);
 
     ssize_t written = send(fds[0], request, strlen(request), 0);
     test_int(written, (int)strlen(request));
