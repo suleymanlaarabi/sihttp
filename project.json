@@ -12,5 +12,12 @@
       "sireflect": "https://github.com/suleymanlaarabi/sireflect",
       "sijson": "https://github.com/suleymanlaarabi/sijson"
     }
+  },
+  "lang.c": {
+    "${os windows}": {
+      "c-standard": "c11",
+      "symbols": false,
+      "cflags": ["/FS"]
+    }
   }
 }
