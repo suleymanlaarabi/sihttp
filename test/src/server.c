@@ -26,7 +26,7 @@ static sihttp_response_t server_user(const sihttp_request_t *req) {
     );
 }
 
-static int server_socketpair(int fds[2]) {
+ static int server_socketpair(int fds[2]) {
 #ifdef _WIN32
     SOCKET listener = socket(AF_INET, SOCK_STREAM, 0);
     SOCKET client = INVALID_SOCKET;
@@ -74,6 +74,22 @@ static int server_socketpair(int fds[2]) {
 #else
     return socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
 #endif
+}
+
+static sihttp_response_t server_dispatch_handler(const sihttp_request_t *req) {
+    (void)req;
+    return sihttp_response({ .status = 200, .body = siformat("dispatch-ok") });
+}
+
+static sihttp_response_t server_dispatch_param_handler(const sihttp_request_t *req) {
+    return sihttp_response({
+        .status = 200,
+        .body = siformat("%ld", sihttp_param(req, "index"))
+    });
+}
+
+static sihttp_response_t server_dispatch_body_handler(const sihttp_request_t *req) {
+    return sihttp_response({ .status = 200, .body = siformat("%s", req->body) });
 }
 
 static char *server_request(sihttp_server_t *server, const char *request) {
@@ -221,5 +237,87 @@ void server_cors_preflight(void) {
     test_assert(strstr(response, "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n") != NULL);
 
     free(response);
+    sihttp_server_fini(server);
+}
+
+void server_dispatch_exact(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+    sihttp_get(server, "/dispatch", server_dispatch_handler);
+
+    sihttp_response_t response = sihttp_server_dispatch(
+        server,
+        SIHTTP_METHOD_GET,
+        "/dispatch",
+        NULL
+    );
+    test_int(response.status, 200);
+    test_str(response.body, "dispatch-ok");
+    sihttp_response_fini(&response);
+    sihttp_server_fini(server);
+}
+
+void server_dispatch_param(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+    sihttp_get(server, "/entities/:index", server_dispatch_param_handler);
+
+    sihttp_response_t response = sihttp_server_dispatch(
+        server,
+        SIHTTP_METHOD_GET,
+        "/entities/42",
+        NULL
+    );
+    test_int(response.status, 200);
+    test_str(response.body, "42");
+    sihttp_response_fini(&response);
+    sihttp_server_fini(server);
+}
+
+void server_dispatch_body(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+    sihttp_post(server, "/dispatch-body", server_dispatch_body_handler);
+
+    sihttp_response_t response = sihttp_server_dispatch(
+        server,
+        SIHTTP_METHOD_POST,
+        "/dispatch-body",
+        "{\"value\":123}"
+    );
+    test_int(response.status, 200);
+    test_str(response.body, "{\"value\":123}");
+    sihttp_response_fini(&response);
+    sihttp_server_fini(server);
+}
+
+void server_dispatch_not_found(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+
+    sihttp_response_t response = sihttp_server_dispatch(
+        server,
+        SIHTTP_METHOD_GET,
+        "/missing",
+        NULL
+    );
+    test_int(response.status, 404);
+    sihttp_response_fini(&response);
+    sihttp_server_fini(server);
+}
+
+void server_dispatch_method_not_allowed(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+    sihttp_get(server, "/dispatch", server_dispatch_handler);
+
+    sihttp_response_t response = sihttp_server_dispatch(
+        server,
+        SIHTTP_METHOD_POST,
+        "/dispatch",
+        NULL
+    );
+    test_int(response.status, 405);
+    sihttp_response_fini(&response);
     sihttp_server_fini(server);
 }

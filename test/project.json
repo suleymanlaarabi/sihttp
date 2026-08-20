@@ -55,7 +55,12 @@
           "poll_idle",
           "poll_roundtrip",
           "not_found",
-          "cors_preflight"
+          "cors_preflight",
+          "dispatch_exact",
+          "dispatch_param",
+          "dispatch_body",
+          "dispatch_not_found",
+          "dispatch_method_not_allowed"
         ]
       }
     ]

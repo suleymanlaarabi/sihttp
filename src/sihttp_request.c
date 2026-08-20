@@ -356,5 +356,23 @@ SIHTTP_API int64_t sihttp_param(const sihttp_request_t *public_req, const char *
         }
     }
 
+    const char *query = strchr(req->public_req.path, '?');
+    if (query) {
+        size_t name_len = strlen(name);
+        query++;
+        while (*query) {
+            const char *value = strchr(query, '=');
+            const char *end = strchr(query, '&');
+            if (!end) {
+                end = query + strlen(query);
+            }
+            if (value && value < end && (size_t)(value - query) == name_len &&
+                memcmp(query, name, name_len) == 0) {
+                return strtoll(value + 1, NULL, 10);
+            }
+            query = *end ? end + 1 : end;
+        }
+    }
+
     return 0;
 }

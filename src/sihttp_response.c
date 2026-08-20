@@ -10,6 +10,17 @@
 #include <sys/socket.h>
 #endif
 
+SIHTTP_API void sihttp_response_fini(sihttp_response_t *response) {
+    if (!response) {
+        return;
+    }
+
+    free(response->body);
+    response->body = NULL;
+    response->status = 0;
+    response->content_type = SIHTTP_CONTENT_AUTO;
+}
+
 static const char *sihttp_status_reason(int status) {
     switch (status) {
     case 200:
@@ -133,12 +144,12 @@ int sihttp_send_response(int fd, sihttp_response_t response) {
     int result;
 
     if (!message) {
-        free(response.body);
+        sihttp_response_fini(&response);
         return -1;
     }
 
     result = sihttp_send_all(fd, message, len);
     free(message);
-    free(response.body);
+    sihttp_response_fini(&response);
     return result;
 }

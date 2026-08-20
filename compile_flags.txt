@@ -1,6 +1,8 @@
 -fvisibility=hidden
 -fPIC
 -g
+-fprofile-arcs
+-ftest-coverage
 -O0
 -std=gnu99
 
@@ -14,6 +16,6 @@
 -fstack-protector-all
 -DBAKE_PROJECT_ID="sihttp"
 -Dsihttp_EXPORTS
--I./include
+-I/home/suleyman/projects/sihttp/include
 -I
 /home/suleyman/bake/include

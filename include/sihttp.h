@@ -95,6 +95,24 @@ SIHTTP_API int sihttp_server_run(sihttp_server_t *server);
 SIHTTP_API void sihttp_server_stop(sihttp_server_t *server);
 SIHTTP_API uint16_t sihttp_server_port(const sihttp_server_t *server);
 
+/*
+ * Dispatch a registered route synchronously without using the network.
+ * path contains only the path and its optional query string. body is NULL
+ * when there is no body. No socket, listen, poll, TCP stream parsing, or HTTP
+ * header serialization is performed. The returned response belongs to the
+ * caller; release response.body with sihttp_response_fini(). The :name route
+ * parameters, sihttp_param(), and sihttp_query() behave as they do over the
+ * network. path and body only need to remain valid until this function returns.
+ */
+SIHTTP_API sihttp_response_t sihttp_server_dispatch(
+    sihttp_server_t *server,
+    sihttp_method_t method,
+    const char *path,
+    const char *body
+);
+
+SIHTTP_API void sihttp_response_fini(sihttp_response_t *response);
+
 /* Route registration. */
 #define sihttp_route(server, path, ...)                                                            \
     sihttp_route_impl(server, path, &(sihttp_handler_desc_t)__VA_ARGS__)

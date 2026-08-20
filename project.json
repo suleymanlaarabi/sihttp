@@ -4,8 +4,15 @@
   "value": {
     "author": "Suleyman Laarabi",
     "description": "easy to use http framework in c",
+    "public": true,
     "clangd": true,
-    "use": ["sireflect", "sijson"]
+    "use": ["sireflect", "sijson"],
+    "amalgamate": [
+      {
+        "path": "distr",
+        "dependencies": true
+      }
+    ]
   },
   "bundle": {
     "repositories": {

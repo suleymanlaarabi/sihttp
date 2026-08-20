@@ -36,7 +36,7 @@ sihttp_route_path_matches(const char *pattern, const char *path, sihttp_request_
             }
 
             value_start = s;
-            while (*s && *s != '/') {
+            while (*s && *s != '/' && *s != '?') {
                 s++;
             }
 
@@ -66,7 +66,7 @@ sihttp_route_path_matches(const char *pattern, const char *path, sihttp_request_
         }
     }
 
-    return *p == '\0' && *s == '\0';
+    return *p == '\0' && (*s == '\0' || *s == '?');
 }
 
 int sihttp_route_table_init(sihttp_route_table_t *table) {
