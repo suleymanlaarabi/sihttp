@@ -70,20 +70,18 @@ sihttp_route_path_matches(const char *pattern, const char *path, sihttp_request_
 }
 
 int sihttp_route_table_init(sihttp_route_table_t *table) {
-    table->entries = NULL;
-    table->count = 0;
-    table->capacity = 0;
+    sicore_vec_init(&table->entries, sizeof(sihttp_route_entry_t));
     return 0;
 }
 
 void sihttp_route_table_fini(sihttp_route_table_t *table) {
-    for (size_t i = 0; i < table->count; i++) {
-        free(table->entries[i].path);
+    sihttp_route_entry_t *entries = sicore_vec_data(&table->entries, sihttp_route_entry_t);
+
+    for (uint32_t i = 0; i < table->entries.size; i++) {
+        free(entries[i].path);
     }
-    free(table->entries);
-    table->entries = NULL;
-    table->count = 0;
-    table->capacity = 0;
+
+    sicore_vec_fini(&table->entries);
 }
 
 int sihttp_route_table_add(
@@ -98,26 +96,19 @@ int sihttp_route_table_add(
         return -1;
     }
 
-    if (table->count == table->capacity) {
-        size_t next = table->capacity ? table->capacity * 2 : 8;
-        sihttp_route_entry_t *entries = realloc(table->entries, next * sizeof(*entries));
-        if (!entries) {
-            return -1;
-        }
-        table->entries = entries;
-        table->capacity = next;
-    }
-
     path_copy = sihttp_strdup(path);
     if (!path_copy) {
         return -1;
     }
 
-    table->entries[table->count++] = (sihttp_route_entry_t){
+    sihttp_route_entry_t entry = {
         .method = method,
         .path = path_copy,
         .callback = callback,
     };
+
+    sicore_vec_push(&table->entries, &entry, sizeof(sihttp_route_entry_t));
+
     return 0;
 }
 
@@ -130,8 +121,10 @@ sihttp_handler_t sihttp_route_table_match(
 ) {
     *method_not_allowed = 0;
 
-    for (size_t i = 0; i < table->count; i++) {
-        const sihttp_route_entry_t *entry = &table->entries[i];
+    const sihttp_route_entry_t *entries = sicore_vec_data(&table->entries, sihttp_route_entry_t);
+
+    for (uint32_t i = 0; i < table->entries.size; i++) {
+        const sihttp_route_entry_t *entry = &entries[i];
         size_t saved_count = req->param_count;
         if (!sihttp_route_path_matches(entry->path, path, req)) {
             req->param_count = saved_count;

@@ -4,7 +4,7 @@
   "value": {
     "public": false,
     "clangd": true,
-    "use": ["sijson", "sireflect"]
+    "use": ["sijson", "sireflect", "sicore"]
   },
   "lang.c": {
     "c-standard": "c23",

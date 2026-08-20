@@ -6,7 +6,7 @@
     "description": "easy to use http framework in c",
     "public": true,
     "clangd": true,
-    "use": ["sireflect", "sijson"],
+    "use": ["sireflect", "sijson", "sicore"],
     "amalgamate": [
       {
         "path": "distr",
@@ -17,7 +17,8 @@
   "bundle": {
     "repositories": {
       "sireflect": "https://github.com/suleymanlaarabi/sireflect",
-      "sijson": "https://github.com/suleymanlaarabi/sijson"
+      "sijson": "https://github.com/suleymanlaarabi/sijson",
+      "sicore": "https://github.com/suleymanlaarabi/sicore"
     }
   },
   "lang.c": {
