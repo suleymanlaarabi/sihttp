@@ -18,6 +18,31 @@ void response_default_status(void) {
     free(message);
 }
 
+void response_binary_keeps_null_bytes(void) {
+    size_t len = 0;
+    char *body = malloc(4);
+    body[0] = 'S';
+    body[1] = 0;
+    body[2] = 'N';
+    body[3] = '!';
+    char *message = sihttp_build_response(
+        sihttp_response({
+            .body = body,
+            .body_size = 4,
+            .content_type = SIHTTP_CONTENT_BINARY,
+        }),
+        &len
+    );
+
+    test_not_null(message);
+    test_assert(strstr(message, "Content-Length: 4\r\n") != NULL);
+    test_int(0, (unsigned char)message[len - 3]);
+    test_int('N', message[len - 2]);
+    test_int('!', message[len - 1]);
+    free(message);
+    free(body);
+}
+
 void response_custom_status(void) {
     size_t len = 0;
     char *message = sihttp_build_response(sihttp_response({ .status = 404, .body = NULL }), &len);

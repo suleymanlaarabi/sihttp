@@ -44,7 +44,8 @@
           "default_status",
           "custom_status",
           "json_content_type",
-          "cors_headers"
+          "cors_headers",
+          "binary_keeps_null_bytes"
         ]
       },
       {
@@ -59,6 +60,7 @@
           "dispatch_exact",
           "dispatch_param",
           "dispatch_body",
+          "dispatch_bytes",
           "dispatch_not_found",
           "dispatch_method_not_allowed"
         ]

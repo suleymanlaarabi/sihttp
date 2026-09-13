@@ -92,6 +92,18 @@ static sihttp_response_t server_dispatch_body_handler(const sihttp_request_t *re
     return sihttp_response({ .status = 200, .body = siformat("%s", req->body) });
 }
 
+static sihttp_response_t server_dispatch_binary_handler(const sihttp_request_t *req) {
+    char *body = malloc(req->body_size);
+    test_not_null(body);
+    memcpy(body, req->body, req->body_size);
+    return sihttp_response({
+        .status = 200,
+        .body = body,
+        .body_size = req->body_size,
+        .content_type = SIHTTP_CONTENT_BINARY,
+    });
+}
+
 static char *server_request(sihttp_server_t *server, const char *request) {
     int fds[2];
     test_int(server_socketpair(fds), 0);
@@ -287,6 +299,22 @@ void server_dispatch_body(void) {
     );
     test_int(response.status, 200);
     test_str(response.body, "{\"value\":123}");
+    sihttp_response_fini(&response);
+    sihttp_server_fini(server);
+}
+
+void server_dispatch_bytes(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+    sihttp_post(server, "/dispatch-bytes", server_dispatch_binary_handler);
+
+    const unsigned char body[] = { 'A', 0, 'B', 'C' };
+    sihttp_response_t response = sihttp_server_dispatch_bytes(
+        server, SIHTTP_METHOD_POST, "/dispatch-bytes", body, sizeof(body)
+    );
+    test_int(response.status, 200);
+    test_int(response.body_size, sizeof(body));
+    test_assert(memcmp(response.body, body, sizeof(body)) == 0);
     sihttp_response_fini(&response);
     sihttp_server_fini(server);
 }

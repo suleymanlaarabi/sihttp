@@ -51,7 +51,19 @@ int sihttp_request_parse(
     size_t len,
     sihttp_app_state_t *state
 );
+sihttp_parse_result_t sihttp_request_parse_state_with_limit(
+    const char *data,
+    size_t len,
+    size_t max_body_bytes
+);
 sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len);
+int sihttp_request_parse_with_limit(
+    sihttp_request_internal_t *req,
+    const char *data,
+    size_t len,
+    sihttp_app_state_t *state,
+    size_t max_body_bytes
+);
 
 char *sihttp_build_response(sihttp_response_t response, size_t *out_len);
 int sihttp_send_response(int fd, sihttp_response_t response);
@@ -81,6 +93,7 @@ struct sihttp_server_s {
     uint16_t port;
     int backlog;
     int max_requests_per_poll;
+    size_t max_body_bytes;
     int running;
 };
 

@@ -17,6 +17,7 @@ SIHTTP_API void sihttp_response_fini(sihttp_response_t *response) {
 
     free(response->body);
     response->body = NULL;
+    response->body_size = 0;
     response->status = 0;
     response->content_type = SIHTTP_CONTENT_AUTO;
 }
@@ -82,7 +83,10 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     const char *reason = sihttp_status_reason(status);
     const char *content_type = sihttp_content_type_name(response.content_type);
     const char *body = response.body ? response.body : "";
-    size_t body_len = response.body ? strlen(response.body) : 0;
+    size_t body_len = response.body ? response.body_size : 0;
+    if (response.body && response.content_type != SIHTTP_CONTENT_BINARY && body_len == 0) {
+        body_len = strlen(response.body);
+    }
     int header_len;
     size_t total;
     char *message;

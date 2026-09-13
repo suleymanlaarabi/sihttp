@@ -1,5 +1,535 @@
 #include "sihttp.h"
 
+#if SICORE_HAS_MAP
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>
+#define SICORE_MAP_SSE2 1
+#elif defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#define SICORE_MAP_NEON 1
+#endif
+
+#define SICORE_GROUP_WIDTH 16u
+#define SICORE_INITIAL_CAPACITY 16u
+#define SICORE_CTRL_EMPTY UINT8_C(0x80)
+#define SICORE_CTRL_DELETED UINT8_C(0xfe)
+
+/* 16 octets sur ABI 64 bits: 1/4 de ligne de cache de 64 octets. */
+typedef struct {
+    const char *key;
+    uint32_t value;
+    uint32_t key_length;
+} sicore_map_entry_t;
+
+/*
+ * Hash de chaîne basé sur wyhash final v4 (domaine public / Unlicense), adapté
+ * et préfixé pour rester entièrement interne à cette unité de compilation.
+ */
+static const uint64_t sicore_hash_secret[5] = { UINT64_C(0xa0761d6478bd642f),
+                                                UINT64_C(0xe7037ed1a0b428db),
+                                                UINT64_C(0x8ebc6af09c88c6e3),
+                                                UINT64_C(0x589965cc75374cc3),
+                                                UINT64_C(0x1d8e4e27c47d124f) };
+
+static inline void sicore_mul128(uint64_t *a, uint64_t *b) {
+#if defined(__SIZEOF_INT128__)
+    __uint128_t r = (__uint128_t)(*a) * (*b);
+    *a = (uint64_t)r;
+    *b = (uint64_t)(r >> 64);
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64))
+    *a = _umul128(*a, *b, b);
+#else
+    const uint64_t ah = *a >> 32;
+    const uint64_t al = (uint32_t)*a;
+    const uint64_t bh = *b >> 32;
+    const uint64_t bl = (uint32_t)*b;
+    const uint64_t rh = ah * bh;
+    const uint64_t rm0 = ah * bl;
+    const uint64_t rm1 = bh * al;
+    const uint64_t rl = al * bl;
+    const uint64_t t = rl + (rm0 << 32);
+    uint64_t carry = t < rl;
+    const uint64_t lo = t + (rm1 << 32);
+    carry += lo < t;
+    *a = lo;
+    *b = rh + (rm0 >> 32) + (rm1 >> 32) + carry;
+#endif
+}
+
+static inline uint64_t sicore_mix(uint64_t a, uint64_t b) {
+    sicore_mul128(&a, &b);
+    return a ^ b;
+}
+
+static inline uint64_t sicore_read64(const uint8_t *p) {
+    uint64_t v;
+    memcpy(&v, p, sizeof(v));
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#if defined(_MSC_VER)
+    v = _byteswap_uint64(v);
+#else
+    v = __builtin_bswap64(v);
+#endif
+#endif
+    return v;
+}
+
+static inline uint64_t sicore_read32(const uint8_t *p) {
+    uint32_t v;
+    memcpy(&v, p, sizeof(v));
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#if defined(_MSC_VER)
+    v = _byteswap_ulong((unsigned long)v);
+#else
+    v = __builtin_bswap32(v);
+#endif
+#endif
+    return v;
+}
+
+static inline uint64_t sicore_read3(const uint8_t *p, size_t len) {
+    return ((uint64_t)p[0] << 16) | ((uint64_t)p[len >> 1] << 8) | (uint64_t)p[len - 1];
+}
+
+static inline uint64_t
+sicore_hash_finish16(const uint8_t *p, uint64_t len, uint64_t seed, size_t remaining) {
+    uint64_t a;
+    uint64_t b;
+
+    if (remaining <= 8) {
+        if (remaining >= 4) {
+            a = sicore_read32(p);
+            b = sicore_read32(p + remaining - 4);
+        } else if (remaining != 0) {
+            a = sicore_read3(p, remaining);
+            b = 0;
+        } else {
+            a = 0;
+            b = 0;
+        }
+    } else {
+        a = sicore_read64(p);
+        b = sicore_read64(p + remaining - 8);
+    }
+
+    return sicore_mix(sicore_hash_secret[1] ^ len, sicore_mix(a ^ sicore_hash_secret[1], b ^ seed));
+}
+
+static inline uint64_t sicore_hash_bytes(const uint8_t *p, size_t len) {
+    size_t remaining = len;
+    uint64_t seed = sicore_hash_secret[0];
+
+    if (SICORE_UNLIKELY(remaining > 64)) {
+        uint64_t seed2 = seed;
+        do {
+            seed =
+                sicore_mix(sicore_read64(p) ^ sicore_hash_secret[1], sicore_read64(p + 8) ^ seed) ^
+                sicore_mix(
+                    sicore_read64(p + 16) ^ sicore_hash_secret[2],
+                    sicore_read64(p + 24) ^ seed
+                );
+            seed2 = sicore_mix(
+                        sicore_read64(p + 32) ^ sicore_hash_secret[3],
+                        sicore_read64(p + 40) ^ seed2
+                    ) ^
+                    sicore_mix(
+                        sicore_read64(p + 48) ^ sicore_hash_secret[4],
+                        sicore_read64(p + 56) ^ seed2
+                    );
+            p += 64;
+            remaining -= 64;
+        } while (remaining > 64);
+        seed ^= seed2;
+    }
+
+    while (remaining > 16) {
+        seed = sicore_mix(sicore_read64(p) ^ sicore_hash_secret[1], sicore_read64(p + 8) ^ seed);
+        p += 16;
+        remaining -= 16;
+    }
+
+    return sicore_hash_finish16(p, (uint64_t)len, seed, remaining);
+}
+
+static inline uint64_t sicore_hash_string(const char *key, uint32_t *length) {
+    const uint32_t len = (uint32_t)strlen(key);
+    *length = len;
+    return sicore_hash_bytes((const uint8_t *)key, len);
+}
+
+static inline uint32_t sicore_ctz32(uint32_t x) {
+#if defined(_MSC_VER)
+    unsigned long bit;
+    _BitScanForward(&bit, x);
+    return (uint32_t)bit;
+#else
+    return (uint32_t)__builtin_ctz(x);
+#endif
+}
+
+#if defined(SICORE_MAP_SSE2)
+static inline uint32_t sicore_match_byte(const uint8_t *ctrl, uint8_t byte) {
+    const __m128i group = _mm_loadu_si128((const __m128i *)(const void *)ctrl);
+    const __m128i wanted = _mm_set1_epi8((char)byte);
+    return (uint32_t)_mm_movemask_epi8(_mm_cmpeq_epi8(group, wanted));
+}
+#elif defined(SICORE_MAP_NEON)
+static inline uint32_t sicore_match_byte(const uint8_t *ctrl, uint8_t byte) {
+    static const uint8_t weights_data[16] = { 1, 2, 4, 8, 16, 32, 64, 128,
+                                              1, 2, 4, 8, 16, 32, 64, 128 };
+    const uint8x16_t group = vld1q_u8(ctrl);
+    const uint8x16_t equal = vceqq_u8(group, vdupq_n_u8(byte));
+    const uint8x16_t bits = vandq_u8(equal, vld1q_u8(weights_data));
+    const uint32_t low = vaddv_u8(vget_low_u8(bits));
+    const uint32_t high = vaddv_u8(vget_high_u8(bits));
+    return low | (high << 8);
+}
+#else
+static inline uint32_t sicore_match_byte(const uint8_t *ctrl, uint8_t byte) {
+    uint32_t mask = 0;
+    for (uint32_t i = 0; i < SICORE_GROUP_WIDTH; ++i) {
+        mask |= (uint32_t)(ctrl[i] == byte) << i;
+    }
+    return mask;
+}
+#endif
+
+static inline uint32_t sicore_max_load(uint32_t capacity) {
+    return capacity - (capacity >> 3); /* 87,5 % */
+}
+
+static inline uint8_t sicore_hash_h2(uint64_t hash) { return (uint8_t)(hash & UINT64_C(0x7f)); }
+
+static inline uint32_t sicore_hash_group(uint64_t hash, uint32_t group_mask) {
+    return (uint32_t)(hash >> 7) & group_mask;
+}
+
+static inline void sicore_allocate(sicore_map_t *map, uint32_t capacity) {
+    const size_t ctrl_bytes = capacity;
+    const size_t entries_bytes = (size_t)capacity * sizeof(sicore_map_entry_t);
+    uint8_t *const block = (uint8_t *)malloc(ctrl_bytes + entries_bytes);
+
+    memset(block, SICORE_CTRL_EMPTY, ctrl_bytes);
+
+    map->ctrl = block;
+    map->entries = block + ctrl_bytes;
+    map->size = 0;
+    map->capacity = capacity;
+    map->growth_left = sicore_max_load(capacity);
+    map->group_mask = (capacity / SICORE_GROUP_WIDTH) - 1u;
+}
+
+static inline void sicore_insert_absent_hashed(
+    sicore_map_t *map,
+    const char *key,
+    uint32_t value,
+    uint32_t key_length,
+    uint64_t hash
+) {
+    sicore_map_entry_t *const entries = (sicore_map_entry_t *)map->entries;
+    const uint8_t h2 = sicore_hash_h2(hash);
+    uint32_t group = sicore_hash_group(hash, map->group_mask);
+    uint32_t probe = 0;
+
+    for (;;) {
+        const uint32_t base = group * SICORE_GROUP_WIDTH;
+        const uint32_t empties = sicore_match_byte(map->ctrl + base, SICORE_CTRL_EMPTY);
+
+        if (empties != 0) {
+            const uint32_t index = base + sicore_ctz32(empties);
+            entries[index].key = key;
+            entries[index].value = value;
+            entries[index].key_length = key_length;
+            map->ctrl[index] = h2;
+            ++map->size;
+            --map->growth_left;
+            return;
+        }
+
+        ++probe;
+        group = (group + probe) & map->group_mask;
+    }
+}
+
+static inline uint32_t
+sicore_find_index(const sicore_map_t *map, const char *key, uint32_t key_length, uint64_t hash) {
+    const sicore_map_entry_t *const entries = (const sicore_map_entry_t *)map->entries;
+    const uint8_t h2 = sicore_hash_h2(hash);
+    uint32_t group = sicore_hash_group(hash, map->group_mask);
+    uint32_t probe = 0;
+
+    for (;;) {
+        const uint32_t base = group * SICORE_GROUP_WIDTH;
+        uint32_t candidates = sicore_match_byte(map->ctrl + base, h2);
+
+        while (candidates != 0) {
+            const uint32_t bit = sicore_ctz32(candidates);
+            const uint32_t index = base + bit;
+            const char *const candidate_key = entries[index].key;
+
+            if (candidate_key == key || (entries[index].key_length == key_length &&
+                                         memcmp(candidate_key, key, key_length) == 0)) {
+                return index;
+            }
+            candidates &= candidates - 1u;
+        }
+
+        if (sicore_match_byte(map->ctrl + base, SICORE_CTRL_EMPTY) != 0) {
+            return UINT32_MAX;
+        }
+
+        ++probe;
+        group = (group + probe) & map->group_mask;
+    }
+}
+
+void sicore_map_init(sicore_map_t *map) { sicore_allocate(map, SICORE_INITIAL_CAPACITY); }
+
+void sicore_map_fini(sicore_map_t *map) { free(map->ctrl); }
+
+SICORE_HOT uint32_t sicore_map_get(const sicore_map_t *map, const char *key) {
+    uint32_t key_length;
+    const uint64_t hash = sicore_hash_string(key, &key_length);
+    const uint32_t index = sicore_find_index(map, key, key_length, hash);
+    return index == UINT32_MAX ? UINT32_MAX
+                               : ((const sicore_map_entry_t *)map->entries)[index].value;
+}
+
+SICORE_HOT bool sicore_map_has(const sicore_map_t *map, const char *key) {
+    uint32_t key_length;
+    const uint64_t hash = sicore_hash_string(key, &key_length);
+    return sicore_find_index(map, key, key_length, hash) != UINT32_MAX;
+}
+
+static void sicore_rehash(sicore_map_t *map, uint32_t new_capacity) {
+    sicore_map_t rebuilt;
+    const uint32_t old_capacity = map->capacity;
+    uint8_t *const old_ctrl = map->ctrl;
+    sicore_map_entry_t *const old_entries = (sicore_map_entry_t *)map->entries;
+
+    sicore_allocate(&rebuilt, new_capacity);
+
+    for (uint32_t i = 0; i < old_capacity; ++i) {
+        if (old_ctrl[i] < SICORE_CTRL_EMPTY) {
+            const char *const key = old_entries[i].key;
+
+            sicore_insert_absent_hashed(
+                &rebuilt,
+                key,
+                old_entries[i].value,
+                old_entries[i].key_length,
+                sicore_hash_bytes((const uint8_t *)key, old_entries[i].key_length)
+            );
+        }
+    }
+
+    free(old_ctrl);
+    *map = rebuilt;
+}
+
+SICORE_HOT void sicore_map_set(sicore_map_t *map, const char *key, uint32_t value) {
+    sicore_map_entry_t *entries = (sicore_map_entry_t *)map->entries;
+
+    uint32_t key_length;
+    const uint64_t hash = sicore_hash_string(key, &key_length);
+    const uint8_t h2 = sicore_hash_h2(hash);
+
+    uint32_t group = sicore_hash_group(hash, map->group_mask);
+    uint32_t probe = 0;
+    uint32_t first_deleted = UINT32_MAX;
+
+    for (;;) {
+        const uint32_t base = group * SICORE_GROUP_WIDTH;
+        uint32_t candidates = sicore_match_byte(map->ctrl + base, h2);
+
+        while (candidates != 0) {
+            const uint32_t bit = sicore_ctz32(candidates);
+            const uint32_t index = base + bit;
+            const char *const candidate_key = entries[index].key;
+
+            if (candidate_key == key || (entries[index].key_length == key_length &&
+                                         memcmp(candidate_key, key, key_length) == 0)) {
+                entries[index].value = value;
+                return;
+            }
+
+            candidates &= candidates - 1u;
+        }
+
+        if (first_deleted == UINT32_MAX) {
+            const uint32_t deleted = sicore_match_byte(map->ctrl + base, SICORE_CTRL_DELETED);
+
+            if (deleted != 0) {
+                first_deleted = base + sicore_ctz32(deleted);
+            }
+        }
+
+        const uint32_t empties = sicore_match_byte(map->ctrl + base, SICORE_CTRL_EMPTY);
+
+        if (empties != 0) {
+            if (first_deleted != UINT32_MAX) {
+                entries[first_deleted].key = key;
+                entries[first_deleted].value = value;
+                entries[first_deleted].key_length = key_length;
+
+                map->ctrl[first_deleted] = h2;
+                ++map->size;
+                return;
+            }
+
+            if (SICORE_UNLIKELY(map->growth_left == 0)) {
+                const uint32_t max_load = sicore_max_load(map->capacity);
+
+                sicore_rehash(map, map->size < max_load ? map->capacity : map->capacity << 1);
+
+                sicore_insert_absent_hashed(map, key, value, key_length, hash);
+
+                return;
+            }
+
+            const uint32_t index = base + sicore_ctz32(empties);
+
+            entries[index].key = key;
+            entries[index].value = value;
+            entries[index].key_length = key_length;
+
+            map->ctrl[index] = h2;
+            ++map->size;
+            --map->growth_left;
+            return;
+        }
+
+        ++probe;
+        group = (group + probe) & map->group_mask;
+    }
+}
+
+SICORE_HOT bool sicore_map_unset(sicore_map_t *map, const char *key) {
+    uint32_t key_length;
+    const uint64_t hash = sicore_hash_string(key, &key_length);
+
+    const uint32_t index = sicore_find_index(map, key, key_length, hash);
+
+    if (index == UINT32_MAX) {
+        return false;
+    }
+
+    const uint32_t base = index & ~(SICORE_GROUP_WIDTH - 1u);
+
+    --map->size;
+
+    if (sicore_match_byte(map->ctrl + base, SICORE_CTRL_EMPTY) != 0) {
+        map->ctrl[index] = SICORE_CTRL_EMPTY;
+        ++map->growth_left;
+    } else {
+        map->ctrl[index] = SICORE_CTRL_DELETED;
+    }
+
+    return true;
+}
+
+#endif
+
+#if SICORE_HAS_VEC
+#include <stdlib.h>
+#include <string.h>
+
+void sicore_vec_init(sicore_vec_t *vec, uint32_t element_size) {
+    vec->data = malloc(element_size);
+    vec->size = 0;
+    vec->capacity = 1;
+}
+
+void sicore_vec_init_w_size(sicore_vec_t *vec, uint32_t element_size, uint32_t size) {
+    vec->data = malloc(element_size * size);
+    vec->size = 0;
+    vec->capacity = size;
+}
+
+void sicore_vec_fini(sicore_vec_t *vec) { free(vec->data); }
+
+void sicore_vec_grow(sicore_vec_t *vec, uint32_t element_size) {
+    vec->capacity *= 2;
+    vec->data = realloc(vec->data, element_size * vec->capacity);
+}
+
+void sicore_vec_push(sicore_vec_t *vec, const void *element, const uint32_t element_size) {
+    if (SICORE_UNLIKELY(vec->size >= vec->capacity)) {
+        sicore_vec_grow(vec, element_size);
+    }
+    memcpy((uint8_t *)vec->data + (vec->size * element_size), element, element_size);
+    vec->size++;
+}
+
+void sicore_vec_ensure(sicore_vec_t *vec, uint32_t count, const uint32_t element_size) {
+    if (count <= vec->size)
+        return;
+    while (vec->capacity < count)
+        sicore_vec_grow(vec, element_size);
+    memset((uint8_t *)vec->data + vec->size * element_size, 0, (count - vec->size) * element_size);
+    vec->size = count;
+}
+
+void sicore_vec_remove_fast(sicore_vec_t *vec, uint32_t index, const uint32_t element_size) {
+    if (index < vec->size - 1) {
+        void *dst = (uint8_t *)vec->data + (index * element_size);
+        const void *src = (uint8_t *)vec->data + ((vec->size - 1) * element_size);
+        memcpy(dst, src, element_size);
+    }
+    vec->size--;
+}
+
+bool sicore_vec_contains_u16(const sicore_vec_t *vec, const uint16_t value) {
+    sicore_vec_iter(vec, uint16_t, current, {
+        if (*current == value) {
+            return true;
+        }
+    });
+    return false;
+}
+
+static inline void sicore_vec_remove_fast_u16(sicore_vec_t *vec, uint32_t index) {
+    if (index < vec->size - 1) {
+        uint16_t *data = vec->data;
+        data[index] = data[vec->size - 1];
+    }
+    vec->size--;
+}
+
+void sicore_vec_remove_u16(sicore_vec_t *vec, const uint16_t value) {
+    sicore_vec_iter(vec, uint16_t, current, {
+        if (*current == value) {
+            sicore_vec_remove_fast_u16(vec, i);
+            return;
+        }
+    });
+}
+
+static inline void sicore_vec_remove_fast_u64(sicore_vec_t *vec, uint32_t index) {
+    if (index < vec->size - 1) {
+        uint64_t *data = vec->data;
+        data[index] = data[vec->size - 1];
+    }
+    vec->size--;
+}
+
+void sicore_vec_remove_u64(sicore_vec_t *vec, uint64_t value) {
+    sicore_vec_iter(vec, uint64_t, current, {
+        if (*current == value) {
+            sicore_vec_remove_fast_u64(vec, i);
+            return;
+        }
+    });
+}
+#endif
+
 #ifndef NDEBUG
 #include <stdio.h>
 #include <stdlib.h>
@@ -3680,6 +4210,10 @@ int sihttp_buffer_append(sihttp_buffer_t *buffer, const char *data, size_t len);
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef _WIN32
+typedef int ssize_t;
+#endif
+
 #define SIHTTP_MAX_HEADER_BYTES (16u * 1024u)
 #define SIHTTP_MAX_BODY_BYTES (1024u * 1024u)
 #define SIHTTP_MAX_HEADERS 64u
@@ -3721,7 +4255,19 @@ int sihttp_request_parse(
     size_t len,
     sihttp_app_state_t *state
 );
+sihttp_parse_result_t sihttp_request_parse_state_with_limit(
+    const char *data,
+    size_t len,
+    size_t max_body_bytes
+);
 sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len);
+int sihttp_request_parse_with_limit(
+    sihttp_request_internal_t *req,
+    const char *data,
+    size_t len,
+    sihttp_app_state_t *state,
+    size_t max_body_bytes
+);
 
 char *sihttp_build_response(sihttp_response_t response, size_t *out_len);
 int sihttp_send_response(int fd, sihttp_response_t response);
@@ -3751,6 +4297,7 @@ struct sihttp_server_s {
     uint16_t port;
     int backlog;
     int max_requests_per_poll;
+    size_t max_body_bytes;
     int running;
 };
 
@@ -3768,20 +4315,41 @@ typedef struct {
 } sihttp_route_entry_t;
 
 struct sihttp_route_table_s {
-    sihttp_route_entry_t *entries;
-    size_t count;
-    size_t capacity;
+    sicore_vec_t entries;
 };
 
 #endif
 
-#include <arpa/inet.h>
 #include <errno.h>
+#include <stdarg.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Ws2_32.lib")
+#define close closesocket
+#define MSG_NOSIGNAL 0
+#define ssize_t int
+#define socklen_t int
+#undef errno
+#undef EINTR
+#undef EAGAIN
+#undef EWOULDBLOCK
+#undef EBADF
+#undef EINVAL
+#define errno WSAGetLastError()
+#define EINTR WSAEINTR
+#define EAGAIN WSAEWOULDBLOCK
+#define EWOULDBLOCK WSAEWOULDBLOCK
+#define EBADF WSAEBADF
+#define EINVAL WSAEINVAL
+#else
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <stdarg.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 static char sihttp_error_buffer[256];
 
@@ -3812,6 +4380,10 @@ enum {
 };
 
 static int sihttp_set_nonblocking(int fd) {
+#ifdef _WIN32
+    u_long mode = 1;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+#else
     int flags = fcntl(fd, F_GETFL, 0);
 
     if (flags == -1) {
@@ -3823,6 +4395,7 @@ static int sihttp_set_nonblocking(int fd) {
     }
 
     return 0;
+#endif
 }
 
 static sihttp_response_t sihttp_error_response(int status, const char *body) {
@@ -3864,6 +4437,17 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     int port = 0;
     int backlog = SIHTTP_DEFAULT_BACKLOG;
     int max_requests_per_poll = SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL;
+    size_t max_body_bytes = SIHTTP_MAX_BODY_BYTES;
+
+#ifdef _WIN32
+    {
+        WSADATA wsa_data;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+            sihttp_set_error("WSAStartup failed");
+            return NULL;
+        }
+    }
+#endif
 
     if (desc) {
         if (desc->port < 0 || desc->port > UINT16_MAX) {
@@ -3875,10 +4459,16 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
         max_requests_per_poll = desc->max_requests_per_poll > 0
             ? desc->max_requests_per_poll
             : SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL;
+        if (desc->max_body_bytes > 0) {
+            max_body_bytes = desc->max_body_bytes;
+        }
     }
 
     server = calloc(1, sizeof(*server));
     if (!server) {
+#ifdef _WIN32
+        WSACleanup();
+#endif
         sihttp_set_error("out of memory");
         return NULL;
     }
@@ -3886,6 +4476,9 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     server->routes = malloc(sizeof(*server->routes));
     if (!server->routes) {
         free(server);
+#ifdef _WIN32
+        WSACleanup();
+#endif
         sihttp_set_error("out of memory");
         return NULL;
     }
@@ -3894,6 +4487,7 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     server->port = (uint16_t)port;
     server->backlog = backlog;
     server->max_requests_per_poll = max_requests_per_poll;
+    server->max_body_bytes = max_body_bytes;
     if (desc) {
         server->state = desc->state;
     }
@@ -3910,6 +4504,9 @@ SIHTTP_API void sihttp_server_fini(sihttp_server_t *server) {
     sihttp_route_table_fini(server->routes);
     free(server->routes);
     free(server);
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 SIHTTP_API int sihttp_server_listen(sihttp_server_t *server, const char *host, uint16_t port) {
@@ -3934,7 +4531,7 @@ SIHTTP_API int sihttp_server_listen(sihttp_server_t *server, const char *host, u
         return -1;
     }
 
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof(yes));
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -3984,7 +4581,11 @@ SIHTTP_API void sihttp_server_stop(sihttp_server_t *server) {
     if (server->listen_fd != -1) {
         int fd = server->listen_fd;
         server->listen_fd = -1;
+#ifdef _WIN32
+        shutdown(fd, SD_BOTH);
+#else
         shutdown(fd, SHUT_RDWR);
+#endif
         close(fd);
     }
 }
@@ -4009,7 +4610,9 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
             break;
         }
         if (received == 0) {
-            parse_state = sihttp_request_parse_state(buffer.data, buffer.len);
+            parse_state = sihttp_request_parse_state_with_limit(
+                buffer.data, buffer.len, server->max_body_bytes
+            );
             status = parse_state.code == 200 ? 200 : 400;
             break;
         }
@@ -4019,7 +4622,9 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
             break;
         }
 
-        parse_state = sihttp_request_parse_state(buffer.data, buffer.len);
+        parse_state = sihttp_request_parse_state_with_limit(
+            buffer.data, buffer.len, server->max_body_bytes
+        );
         if (parse_state.code == 200) {
             status = 200;
             break;
@@ -4036,7 +4641,9 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
         return -1;
     }
 
-    status = sihttp_request_parse(&req, buffer.data, buffer.len, server->state);
+    status = sihttp_request_parse_with_limit(
+        &req, buffer.data, buffer.len, server->state, server->max_body_bytes
+    );
     if (status != 200) {
         sihttp_send_response(client_fd, sihttp_error_response(status, ""));
         sihttp_buffer_fini(&buffer);
@@ -4067,6 +4674,16 @@ SIHTTP_API sihttp_response_t sihttp_server_dispatch(
     const char *path,
     const char *body
 ) {
+    return sihttp_server_dispatch_bytes(server, method, path, body, body ? strlen(body) : 0);
+}
+
+SIHTTP_API sihttp_response_t sihttp_server_dispatch_bytes(
+    sihttp_server_t *server,
+    sihttp_method_t method,
+    const char *path,
+    const void *data,
+    size_t size
+) {
     sihttp_request_internal_t req;
     sihttp_response_t response;
 
@@ -4074,7 +4691,8 @@ SIHTTP_API sihttp_response_t sihttp_server_dispatch(
 
     req.public_req.method = sihttp_method_name(method);
     req.public_req.path = path;
-    req.public_req.body = body;
+    req.public_req.body = data;
+    req.public_req.body_size = size;
     req.public_req.state = server->state;
 
     response = sihttp_dispatch_request(server, method, &req);
@@ -4458,7 +5076,11 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
     return SIHTTP_METHOD_GET;
 }
 
-sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
+sihttp_parse_result_t sihttp_request_parse_state_with_limit(
+    const char *data,
+    size_t len,
+    size_t max_body_bytes
+) {
     sihttp_parse_result_t result = { .code = 0, .expected_len = 0 };
     const char *headers_end;
     size_t header_len;
@@ -4524,7 +5146,7 @@ sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
 
     free(copy);
 
-    if (content_length > SIHTTP_MAX_BODY_BYTES) {
+    if (content_length > max_body_bytes) {
         result.code = 413;
         return result;
     }
@@ -4536,11 +5158,16 @@ sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
     return result;
 }
 
-int sihttp_request_parse(
+sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
+    return sihttp_request_parse_state_with_limit(data, len, SIHTTP_MAX_BODY_BYTES);
+}
+
+int sihttp_request_parse_with_limit(
     sihttp_request_internal_t *req,
     const char *data,
     size_t len,
-    sihttp_app_state_t *state
+    sihttp_app_state_t *state,
+    size_t max_body_bytes
 ) {
     sihttp_parse_result_t state_result;
     char *headers_end;
@@ -4554,7 +5181,7 @@ int sihttp_request_parse(
 
     sihttp_request_internal_init(req);
 
-    state_result = sihttp_request_parse_state(data, len);
+    state_result = sihttp_request_parse_state_with_limit(data, len, max_body_bytes);
     if (state_result.code != 200) {
         return state_result.code ? state_result.code : 400;
     }
@@ -4613,8 +5240,18 @@ int sihttp_request_parse(
     req->public_req.method = method;
     req->public_req.path = target;
     req->public_req.body = body;
+    req->public_req.body_size = state_result.expected_len - (size_t)(body - req->storage);
     req->public_req.state = state;
     return 200;
+}
+
+int sihttp_request_parse(
+    sihttp_request_internal_t *req,
+    const char *data,
+    size_t len,
+    sihttp_app_state_t *state
+) {
+    return sihttp_request_parse_with_limit(req, data, len, state, SIHTTP_MAX_BODY_BYTES);
 }
 
 SIHTTP_API int64_t sihttp_param(const sihttp_request_t *public_req, const char *name) {
@@ -4653,6 +5290,13 @@ SIHTTP_API int64_t sihttp_param(const sihttp_request_t *public_req, const char *
     return 0;
 }
 
+#ifdef _WIN32
+#include <winsock2.h>
+#define MSG_NOSIGNAL 0
+#else
+#include <sys/socket.h>
+#endif
+
 SIHTTP_API void sihttp_response_fini(sihttp_response_t *response) {
     if (!response) {
         return;
@@ -4660,6 +5304,7 @@ SIHTTP_API void sihttp_response_fini(sihttp_response_t *response) {
 
     free(response->body);
     response->body = NULL;
+    response->body_size = 0;
     response->status = 0;
     response->content_type = SIHTTP_CONTENT_AUTO;
 }
@@ -4725,7 +5370,10 @@ char *sihttp_build_response(sihttp_response_t response, size_t *out_len) {
     const char *reason = sihttp_status_reason(status);
     const char *content_type = sihttp_content_type_name(response.content_type);
     const char *body = response.body ? response.body : "";
-    size_t body_len = response.body ? strlen(response.body) : 0;
+    size_t body_len = response.body ? response.body_size : 0;
+    if (response.body && response.content_type != SIHTTP_CONTENT_BINARY && body_len == 0) {
+        body_len = strlen(response.body);
+    }
     int header_len;
     size_t total;
     char *message;
@@ -4864,20 +5512,18 @@ sihttp_route_path_matches(const char *pattern, const char *path, sihttp_request_
 }
 
 int sihttp_route_table_init(sihttp_route_table_t *table) {
-    table->entries = NULL;
-    table->count = 0;
-    table->capacity = 0;
+    sicore_vec_init(&table->entries, sizeof(sihttp_route_entry_t));
     return 0;
 }
 
 void sihttp_route_table_fini(sihttp_route_table_t *table) {
-    for (size_t i = 0; i < table->count; i++) {
-        free(table->entries[i].path);
+    sihttp_route_entry_t *entries = sicore_vec_data(&table->entries, sihttp_route_entry_t);
+
+    for (uint32_t i = 0; i < table->entries.size; i++) {
+        free(entries[i].path);
     }
-    free(table->entries);
-    table->entries = NULL;
-    table->count = 0;
-    table->capacity = 0;
+
+    sicore_vec_fini(&table->entries);
 }
 
 int sihttp_route_table_add(
@@ -4892,26 +5538,19 @@ int sihttp_route_table_add(
         return -1;
     }
 
-    if (table->count == table->capacity) {
-        size_t next = table->capacity ? table->capacity * 2 : 8;
-        sihttp_route_entry_t *entries = realloc(table->entries, next * sizeof(*entries));
-        if (!entries) {
-            return -1;
-        }
-        table->entries = entries;
-        table->capacity = next;
-    }
-
     path_copy = sihttp_strdup(path);
     if (!path_copy) {
         return -1;
     }
 
-    table->entries[table->count++] = (sihttp_route_entry_t){
+    sihttp_route_entry_t entry = {
         .method = method,
         .path = path_copy,
         .callback = callback,
     };
+
+    sicore_vec_push(&table->entries, &entry, sizeof(sihttp_route_entry_t));
+
     return 0;
 }
 
@@ -4924,8 +5563,10 @@ sihttp_handler_t sihttp_route_table_match(
 ) {
     *method_not_allowed = 0;
 
-    for (size_t i = 0; i < table->count; i++) {
-        const sihttp_route_entry_t *entry = &table->entries[i];
+    const sihttp_route_entry_t *entries = sicore_vec_data(&table->entries, sihttp_route_entry_t);
+
+    for (uint32_t i = 0; i < table->entries.size; i++) {
+        const sihttp_route_entry_t *entry = &entries[i];
         size_t saved_count = req->param_count;
         if (!sihttp_route_path_matches(entry->path, path, req)) {
             req->param_count = saved_count;

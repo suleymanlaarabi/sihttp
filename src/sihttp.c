@@ -122,6 +122,7 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     int port = 0;
     int backlog = SIHTTP_DEFAULT_BACKLOG;
     int max_requests_per_poll = SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL;
+    size_t max_body_bytes = SIHTTP_MAX_BODY_BYTES;
 
 #ifdef _WIN32
     {
@@ -143,6 +144,9 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
         max_requests_per_poll = desc->max_requests_per_poll > 0
             ? desc->max_requests_per_poll
             : SIHTTP_DEFAULT_MAX_REQUESTS_PER_POLL;
+        if (desc->max_body_bytes > 0) {
+            max_body_bytes = desc->max_body_bytes;
+        }
     }
 
     server = calloc(1, sizeof(*server));
@@ -168,6 +172,7 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     server->port = (uint16_t)port;
     server->backlog = backlog;
     server->max_requests_per_poll = max_requests_per_poll;
+    server->max_body_bytes = max_body_bytes;
     if (desc) {
         server->state = desc->state;
     }
@@ -290,7 +295,9 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
             break;
         }
         if (received == 0) {
-            parse_state = sihttp_request_parse_state(buffer.data, buffer.len);
+            parse_state = sihttp_request_parse_state_with_limit(
+                buffer.data, buffer.len, server->max_body_bytes
+            );
             status = parse_state.code == 200 ? 200 : 400;
             break;
         }
@@ -300,7 +307,9 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
             break;
         }
 
-        parse_state = sihttp_request_parse_state(buffer.data, buffer.len);
+        parse_state = sihttp_request_parse_state_with_limit(
+            buffer.data, buffer.len, server->max_body_bytes
+        );
         if (parse_state.code == 200) {
             status = 200;
             break;
@@ -317,7 +326,9 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
         return -1;
     }
 
-    status = sihttp_request_parse(&req, buffer.data, buffer.len, server->state);
+    status = sihttp_request_parse_with_limit(
+        &req, buffer.data, buffer.len, server->state, server->max_body_bytes
+    );
     if (status != 200) {
         sihttp_send_response(client_fd, sihttp_error_response(status, ""));
         sihttp_buffer_fini(&buffer);
@@ -348,6 +359,16 @@ SIHTTP_API sihttp_response_t sihttp_server_dispatch(
     const char *path,
     const char *body
 ) {
+    return sihttp_server_dispatch_bytes(server, method, path, body, body ? strlen(body) : 0);
+}
+
+SIHTTP_API sihttp_response_t sihttp_server_dispatch_bytes(
+    sihttp_server_t *server,
+    sihttp_method_t method,
+    const char *path,
+    const void *data,
+    size_t size
+) {
     sihttp_request_internal_t req;
     sihttp_response_t response;
 
@@ -355,7 +376,8 @@ SIHTTP_API sihttp_response_t sihttp_server_dispatch(
 
     req.public_req.method = sihttp_method_name(method);
     req.public_req.path = path;
-    req.public_req.body = body;
+    req.public_req.body = data;
+    req.public_req.body_size = size;
     req.public_req.state = server->state;
 
     response = sihttp_dispatch_request(server, method, &req);

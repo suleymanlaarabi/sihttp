@@ -26,6 +26,7 @@ void response_default_status(void);
 void response_custom_status(void);
 void response_json_content_type(void);
 void response_cors_headers(void);
+void response_binary_keeps_null_bytes(void);
 
 // Testsuite 'server'
 void server_config(void);
@@ -34,6 +35,12 @@ void server_poll_idle(void);
 void server_poll_roundtrip(void);
 void server_not_found(void);
 void server_cors_preflight(void);
+void server_dispatch_exact(void);
+void server_dispatch_param(void);
+void server_dispatch_body(void);
+void server_dispatch_bytes(void);
+void server_dispatch_not_found(void);
+void server_dispatch_method_not_allowed(void);
 
 bake_test_case siformat_testcases[] = {
     {
@@ -88,6 +95,10 @@ bake_test_case response_testcases[] = {
     {
         "cors_headers",
         response_cors_headers
+    },
+    {
+        "binary_keeps_null_bytes",
+        response_binary_keeps_null_bytes
     }
 };
 
@@ -115,6 +126,30 @@ bake_test_case server_testcases[] = {
     {
         "cors_preflight",
         server_cors_preflight
+    },
+    {
+        "dispatch_exact",
+        server_dispatch_exact
+    },
+    {
+        "dispatch_param",
+        server_dispatch_param
+    },
+    {
+        "dispatch_body",
+        server_dispatch_body
+    },
+    {
+        "dispatch_bytes",
+        server_dispatch_bytes
+    },
+    {
+        "dispatch_not_found",
+        server_dispatch_not_found
+    },
+    {
+        "dispatch_method_not_allowed",
+        server_dispatch_method_not_allowed
     }
 };
 
@@ -145,14 +180,14 @@ static bake_test_suite suites[] = {
         "response",
         NULL,
         NULL,
-        4,
+        5,
         response_testcases
     },
     {
         "server",
         NULL,
         NULL,
-        6,
+        12,
         server_testcases
     }
 };

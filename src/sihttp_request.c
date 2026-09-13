@@ -182,7 +182,11 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
     return SIHTTP_METHOD_GET;
 }
 
-sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
+sihttp_parse_result_t sihttp_request_parse_state_with_limit(
+    const char *data,
+    size_t len,
+    size_t max_body_bytes
+) {
     sihttp_parse_result_t result = { .code = 0, .expected_len = 0 };
     const char *headers_end;
     size_t header_len;
@@ -248,7 +252,7 @@ sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
 
     free(copy);
 
-    if (content_length > SIHTTP_MAX_BODY_BYTES) {
+    if (content_length > max_body_bytes) {
         result.code = 413;
         return result;
     }
@@ -260,11 +264,16 @@ sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
     return result;
 }
 
-int sihttp_request_parse(
+sihttp_parse_result_t sihttp_request_parse_state(const char *data, size_t len) {
+    return sihttp_request_parse_state_with_limit(data, len, SIHTTP_MAX_BODY_BYTES);
+}
+
+int sihttp_request_parse_with_limit(
     sihttp_request_internal_t *req,
     const char *data,
     size_t len,
-    sihttp_app_state_t *state
+    sihttp_app_state_t *state,
+    size_t max_body_bytes
 ) {
     sihttp_parse_result_t state_result;
     char *headers_end;
@@ -278,7 +287,7 @@ int sihttp_request_parse(
 
     sihttp_request_internal_init(req);
 
-    state_result = sihttp_request_parse_state(data, len);
+    state_result = sihttp_request_parse_state_with_limit(data, len, max_body_bytes);
     if (state_result.code != 200) {
         return state_result.code ? state_result.code : 400;
     }
@@ -337,8 +346,18 @@ int sihttp_request_parse(
     req->public_req.method = method;
     req->public_req.path = target;
     req->public_req.body = body;
+    req->public_req.body_size = state_result.expected_len - (size_t)(body - req->storage);
     req->public_req.state = state;
     return 200;
+}
+
+int sihttp_request_parse(
+    sihttp_request_internal_t *req,
+    const char *data,
+    size_t len,
+    sihttp_app_state_t *state
+) {
+    return sihttp_request_parse_with_limit(req, data, len, state, SIHTTP_MAX_BODY_BYTES);
 }
 
 SIHTTP_API int64_t sihttp_param(const sihttp_request_t *public_req, const char *name) {

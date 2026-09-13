@@ -5,6 +5,7 @@
 #include "sijson.h"
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,6 +42,7 @@ typedef enum {
 typedef struct {
     int status;
     char *body;
+    size_t body_size;
     sihttp_content_type_t content_type;
 } sihttp_response_t;
 
@@ -49,6 +51,7 @@ typedef struct {
     const char *method;
     const char *path;
     const char *body;
+    size_t body_size;
     sihttp_app_state_t *state;
 } sihttp_request_t;
 
@@ -79,6 +82,7 @@ typedef struct {
     sihttp_app_state_t *state;
     int backlog;
     int max_requests_per_poll;
+    size_t max_body_bytes;
 } sihttp_server_desc_t;
 
 /* Server lifecycle. */
@@ -109,6 +113,15 @@ SIHTTP_API sihttp_response_t sihttp_server_dispatch(
     sihttp_method_t method,
     const char *path,
     const char *body
+);
+
+/* Binary-safe variant of sihttp_server_dispatch. */
+SIHTTP_API sihttp_response_t sihttp_server_dispatch_bytes(
+    sihttp_server_t *server,
+    sihttp_method_t method,
+    const char *path,
+    const void *data,
+    size_t size
 );
 
 SIHTTP_API void sihttp_response_fini(sihttp_response_t *response);

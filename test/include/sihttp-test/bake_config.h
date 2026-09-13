@@ -20,6 +20,7 @@
 /* Headers of public dependencies */
 #include <sijson.h>
 #include <sireflect.h>
+#include <sicore.h>
 #include <bake_test.h>
 
 #endif

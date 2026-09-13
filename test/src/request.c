@@ -34,6 +34,7 @@ void request_parse_post_body(void) {
     test_str(req.public_req.method, "POST");
     test_str(req.public_req.path, "/login");
     test_str(req.public_req.body, "{\"user\":\"root\"}");
+    test_uint(req.public_req.body_size, 15);
 
     sihttp_request_internal_fini(&req);
 }
