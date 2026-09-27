@@ -28,8 +28,11 @@ typedef struct {
     size_t param_count;
     sihttp_pair_t query[SIHTTP_MAX_PARAMS];
     size_t query_count;
+    sihttp_pair_t headers[SIHTTP_MAX_HEADERS];
+    size_t header_count;
     char *storage;
     size_t storage_len;
+    char *header_storage;
 } sihttp_request_internal_t;
 
 typedef struct {
@@ -44,6 +47,7 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok);
 
 void sihttp_request_internal_init(sihttp_request_internal_t *req);
 void sihttp_request_internal_fini(sihttp_request_internal_t *req);
+int sihttp_request_set_target(sihttp_request_internal_t *req, char *target);
 int sihttp_request_add_param(sihttp_request_internal_t *req, const char *name, const char *value);
 int sihttp_request_parse(
     sihttp_request_internal_t *req,
@@ -65,8 +69,9 @@ int sihttp_request_parse_with_limit(
     size_t max_body_bytes
 );
 
-char *sihttp_build_response(sihttp_response_t response, size_t *out_len);
-int sihttp_send_response(int fd, sihttp_response_t response);
+void sihttp_response_normalize(sihttp_response_t *response);
+char *sihttp_build_response(sihttp_response_t response, const sihttp_cors_desc_t *cors, size_t *out_len);
+int sihttp_send_response(int fd, sihttp_response_t response, const sihttp_cors_desc_t *cors);
 
 typedef struct sihttp_route_table_s sihttp_route_table_t;
 
@@ -88,6 +93,8 @@ sihttp_handler_t sihttp_route_table_match(
 
 struct sihttp_server_s {
     sihttp_app_state_t *state;
+    char *host;
+    sihttp_cors_desc_t cors;
     sihttp_route_table_t *routes;
     int listen_fd;
     uint16_t port;

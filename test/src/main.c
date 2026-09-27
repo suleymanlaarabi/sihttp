@@ -15,11 +15,14 @@ void siformat_empty(void);
 // Testsuite 'request'
 void request_parse_get_query(void);
 void request_parse_post_body(void);
+void request_headers_and_query(void);
+void request_path_numbers(void);
 
 // Testsuite 'route'
 void route_exact(void);
 void route_param(void);
 void route_method_not_allowed(void);
+void route_multiple_and_rollback(void);
 
 // Testsuite 'response'
 void response_default_status(void);
@@ -27,6 +30,8 @@ void response_custom_status(void);
 void response_json_content_type(void);
 void response_cors_headers(void);
 void response_binary_keeps_null_bytes(void);
+void response_helpers(void);
+void response_status_and_cors(void);
 
 // Testsuite 'server'
 void server_config(void);
@@ -41,6 +46,9 @@ void server_dispatch_body(void);
 void server_dispatch_bytes(void);
 void server_dispatch_not_found(void);
 void server_dispatch_method_not_allowed(void);
+void server_dispatch_features(void);
+void server_options_and_cors(void);
+void server_network_body_limit(void);
 
 bake_test_case siformat_testcases[] = {
     {
@@ -61,6 +69,14 @@ bake_test_case request_testcases[] = {
     {
         "parse_post_body",
         request_parse_post_body
+    },
+    {
+        "headers_and_query",
+        request_headers_and_query
+    },
+    {
+        "path_numbers",
+        request_path_numbers
     }
 };
 
@@ -76,6 +92,10 @@ bake_test_case route_testcases[] = {
     {
         "method_not_allowed",
         route_method_not_allowed
+    },
+    {
+        "multiple_and_rollback",
+        route_multiple_and_rollback
     }
 };
 
@@ -99,6 +119,14 @@ bake_test_case response_testcases[] = {
     {
         "binary_keeps_null_bytes",
         response_binary_keeps_null_bytes
+    },
+    {
+        "helpers",
+        response_helpers
+    },
+    {
+        "status_and_cors",
+        response_status_and_cors
     }
 };
 
@@ -150,6 +178,18 @@ bake_test_case server_testcases[] = {
     {
         "dispatch_method_not_allowed",
         server_dispatch_method_not_allowed
+    },
+    {
+        "dispatch_features",
+        server_dispatch_features
+    },
+    {
+        "options_and_cors",
+        server_options_and_cors
+    },
+    {
+        "network_body_limit",
+        server_network_body_limit
     }
 };
 
@@ -166,28 +206,28 @@ static bake_test_suite suites[] = {
         "request",
         NULL,
         NULL,
-        2,
+        4,
         request_testcases
     },
     {
         "route",
         NULL,
         NULL,
-        3,
+        4,
         route_testcases
     },
     {
         "response",
         NULL,
         NULL,
-        5,
+        7,
         response_testcases
     },
     {
         "server",
         NULL,
         NULL,
-        12,
+        15,
         server_testcases
     }
 };

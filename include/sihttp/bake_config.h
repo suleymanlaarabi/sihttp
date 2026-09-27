@@ -20,6 +20,7 @@
 /* Headers of public dependencies */
 #include <sireflect.h>
 #include <sijson.h>
+#include <sicore.h>
 
 /* Convenience macro for exporting symbols */
 #ifndef sihttp_STATIC

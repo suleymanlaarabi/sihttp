@@ -232,7 +232,7 @@ void server_not_found(void) {
 }
 
 void server_cors_preflight(void) {
-    sihttp_server_t *server = sihttp_server({});
+    sihttp_server_t *server = sihttp_server({ .cors = {.enabled = true} });
     test_not_null(server);
 
     char *response = server_request(
@@ -347,5 +347,94 @@ void server_dispatch_method_not_allowed(void) {
     );
     test_int(response.status, 405);
     sihttp_response_fini(&response);
+    sihttp_server_fini(server);
+}
+
+static int server_calls;
+static sihttp_response_t server_inspect(const sihttp_request_t *req) {
+    server_calls++;
+    const char *id = sihttp_path_param(req, "id");
+    const char *query = sihttp_query(req, "id");
+    const char *auth = sihttp_header(req, "authorization");
+    return sihttp_response({.body = siformat("%s|%s|%s|%s", req->path, id ? id : "", query ? query : "", auth ? auth : "")});
+}
+
+void server_dispatch_features(void) {
+    sihttp_server_t *server = sihttp_server({.max_body_bytes = 3, .host = "127.0.0.1"});
+    test_not_null(server);
+    sihttp_get(server, "/items/:id", server_inspect);
+    server_calls = 0;
+    sihttp_header_t headers[] = {{"Authorization", " token "}};
+    sihttp_dispatch_desc_t desc = {.method = SIHTTP_METHOD_GET, .path = "/items/42?id=7",
+        .body = "abc", .body_size = 3, .headers = headers, .header_count = 1};
+    sihttp_response_t response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 200);
+    test_str(response.body, "/items/42|42|7|token");
+    test_int(server_calls, 1);
+    sihttp_response_fini(&response);
+    desc.body_size = 4;
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 413);
+    test_int(server_calls, 1);
+    sihttp_response_fini(&response);
+    desc.body_size = 2;
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 200);
+    test_int(server_calls, 2);
+    sihttp_response_fini(&response);
+    char *wire = server_request(server, "GET /items/42?id=7 HTTP/1.1\r\nHost: localhost\r\nAuthorization: token\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 200 OK") == wire);
+    test_assert(strstr(wire, "\r\n\r\n/items/42|42|7|token") != NULL);
+    free(wire);
+    test_int(sihttp_server_start(server), 0);
+    test_assert(server->host && strcmp(server->host, "127.0.0.1") == 0);
+    sihttp_server_fini(server);
+}
+
+static sihttp_response_t server_options_handler(const sihttp_request_t *req) {
+    (void)req;
+    return sihttp_response_text(202, "explicit");
+}
+
+void server_options_and_cors(void) {
+    sihttp_server_t *server = sihttp_server({.cors = {.enabled = true, .allow_origin = "https://example.test"}});
+    test_not_null(server);
+    sihttp_options(server, "/explicit", server_options_handler);
+    sihttp_response_t response = sihttp_server_dispatch(server, SIHTTP_METHOD_OPTIONS, "/explicit", NULL);
+    test_int(response.status, 202);
+    test_str(response.body, "explicit");
+    sihttp_response_fini(&response);
+    response = sihttp_server_dispatch(server, SIHTTP_METHOD_OPTIONS, "/auto", NULL);
+    test_int(response.status, 204);
+    sihttp_response_fini(&response);
+    char *wire = server_request(server, "OPTIONS /explicit HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 202 Accepted") == wire);
+    free(wire);
+    wire = server_request(server, "OPTIONS /auto HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "Access-Control-Allow-Origin: https://example.test") != NULL);
+    free(wire);
+    sihttp_server_fini(server);
+    server = sihttp_server({});
+    response = sihttp_server_dispatch(server, SIHTTP_METHOD_OPTIONS, "/auto", NULL);
+    test_int(response.status, 404);
+    sihttp_response_fini(&response);
+    wire = server_request(server, "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "Access-Control-Allow-Origin") == NULL);
+    free(wire);
+    sihttp_server_fini(server);
+}
+
+void server_network_body_limit(void) {
+    sihttp_server_t *server = sihttp_server({.max_body_bytes = 3});
+    sihttp_post(server, "/body", server_dispatch_handler);
+    char *wire = server_request(server, "POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nabc");
+    test_assert(strstr(wire, "HTTP/1.1 200 OK") == wire);
+    free(wire);
+    wire = server_request(server, "POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nab");
+    test_assert(strstr(wire, "HTTP/1.1 200 OK") == wire);
+    free(wire);
+    wire = server_request(server, "POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nabcd");
+    test_assert(strstr(wire, "HTTP/1.1 413 Payload Too Large") == wire);
+    free(wire);
     sihttp_server_fini(server);
 }

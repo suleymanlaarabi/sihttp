@@ -4,15 +4,25 @@
   "value": {
     "public": false,
     "clangd": true,
-    "use": ["sijson", "sireflect", "sicore"]
+    "use": [
+      "sijson",
+      "sireflect",
+      "sicore"
+    ]
   },
   "lang.c": {
     "c-standard": "c23",
     "${os windows}": {
       "c-standard": "c11",
-      "cflags": ["/FS", "/Dsihttp_EXPORTS"]
+      "cflags": [
+        "/FS",
+        "/Dsihttp_EXPORTS"
+      ]
     },
-    "include": ["../include", "../src"]
+    "include": [
+      "../include",
+      "../src"
+    ]
   },
   "test": {
     "testsuites": [
@@ -27,7 +37,9 @@
         "id": "request",
         "testcases": [
           "parse_get_query",
-          "parse_post_body"
+          "parse_post_body",
+          "headers_and_query",
+          "path_numbers"
         ]
       },
       {
@@ -35,7 +47,8 @@
         "testcases": [
           "exact",
           "param",
-          "method_not_allowed"
+          "method_not_allowed",
+          "multiple_and_rollback"
         ]
       },
       {
@@ -45,7 +58,9 @@
           "custom_status",
           "json_content_type",
           "cors_headers",
-          "binary_keeps_null_bytes"
+          "binary_keeps_null_bytes",
+          "helpers",
+          "status_and_cors"
         ]
       },
       {
@@ -62,7 +77,10 @@
           "dispatch_body",
           "dispatch_bytes",
           "dispatch_not_found",
-          "dispatch_method_not_allowed"
+          "dispatch_method_not_allowed",
+          "dispatch_features",
+          "options_and_cors",
+          "network_body_limit"
         ]
       }
     ]

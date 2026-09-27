@@ -63,3 +63,22 @@ void route_method_not_allowed(void) {
     sihttp_request_internal_fini(&req);
     sihttp_route_table_fini(&routes);
 }
+
+void route_multiple_and_rollback(void) {
+    sihttp_route_table_t routes;
+    sihttp_request_internal_t req;
+    int method_not_allowed = 0;
+    sihttp_route_table_init(&routes);
+    test_int(sihttp_route_table_add(&routes, SIHTTP_METHOD_GET, "/:first/nope", route_noop), 0);
+    test_int(sihttp_route_table_add(&routes, SIHTTP_METHOD_GET, "/:one/:second", route_noop), 0);
+    sihttp_request_internal_init(&req);
+    sihttp_handler_t handler = sihttp_route_table_match(&routes, SIHTTP_METHOD_GET,
+        "/a/longer", &req, &method_not_allowed);
+    test_not_null(handler);
+    test_uint(req.param_count, 2);
+    test_str(sihttp_path_param(&req.public_req, "one"), "a");
+    test_str(sihttp_path_param(&req.public_req, "second"), "longer");
+    test_assert(sihttp_path_param(&req.public_req, "first") == NULL);
+    sihttp_request_internal_fini(&req);
+    sihttp_route_table_fini(&routes);
+}

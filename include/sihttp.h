@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -72,17 +73,33 @@ typedef struct {
     sihttp_handler_t callback;
 } sihttp_handler_desc_t;
 
+typedef struct {
+    const char *name;
+    const char *value;
+} sihttp_header_t;
+
+typedef struct {
+    bool enabled;
+    const char *allow_origin;
+    const char *allow_methods;
+    const char *allow_headers;
+} sihttp_cors_desc_t;
+
 /* Server configuration.
  * state is owned by the user and must outlive the server.
  * port 0 lets the OS choose a port; backlog uses a library default when set to 0.
  * max_requests_per_poll limits per-frame work; 0 uses a library default.
+ * host is copied and defaults to all IPv4 interfaces. CORS is disabled unless
+ * cors.enabled is true; omitted allow_* values use the library defaults.
  */
 typedef struct {
+    const char *host;
     int port;
     sihttp_app_state_t *state;
     int backlog;
     int max_requests_per_poll;
     size_t max_body_bytes;
+    sihttp_cors_desc_t cors;
 } sihttp_server_desc_t;
 
 /* Server lifecycle. */
@@ -124,7 +141,25 @@ SIHTTP_API sihttp_response_t sihttp_server_dispatch_bytes(
     size_t size
 );
 
+typedef struct {
+    sihttp_method_t method;
+    const char *path;
+    const void *body;
+    size_t body_size;
+    const sihttp_header_t *headers;
+    size_t header_count;
+} sihttp_dispatch_desc_t;
+
+SIHTTP_API sihttp_response_t
+sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t *desc);
+
 SIHTTP_API void sihttp_response_fini(sihttp_response_t *response);
+SIHTTP_API sihttp_response_t sihttp_response_empty(int status);
+SIHTTP_API sihttp_response_t sihttp_response_text(int status, const char *text);
+SIHTTP_API sihttp_response_t sihttp_response_json(int status, sijson_value_t value);
+SIHTTP_API sihttp_response_t sihttp_response_json_error(int status, const char *message);
+/* Takes ownership of data, which must be free-compatible. */
+SIHTTP_API sihttp_response_t sihttp_response_take_binary(int status, void *data, size_t size);
 
 /* Route registration. */
 #define sihttp_route(server, path, ...)                                                            \
@@ -137,8 +172,17 @@ SIHTTP_API void sihttp_get(sihttp_server_t *server, const char *path, sihttp_han
 SIHTTP_API void sihttp_post(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_put(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_delete(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
+SIHTTP_API void sihttp_options(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 
-/* Route parameters are intentionally parsed as integers only. */
+/* Returned request values remain valid during the handler call. */
+SIHTTP_API const char *sihttp_path_param(const sihttp_request_t *req, const char *name);
+SIHTTP_API bool sihttp_path_param_u32(const sihttp_request_t *req, const char *name, uint32_t *out);
+SIHTTP_API bool sihttp_path_param_u16(const sihttp_request_t *req, const char *name, uint16_t *out);
+SIHTTP_API const char *sihttp_query(const sihttp_request_t *req, const char *name);
+SIHTTP_API bool sihttp_query_u32(const sihttp_request_t *req, const char *name, uint32_t *out);
+SIHTTP_API bool sihttp_query_bool(const sihttp_request_t *req, const char *name, bool *out);
+SIHTTP_API const char *sihttp_header(const sihttp_request_t *req, const char *name);
+/* Legacy numeric path parameter accessor; returns 0 when absent or invalid. */
 SIHTTP_API int64_t sihttp_param(const sihttp_request_t *req, const char *name);
 
 /* Last library error for the current process. */

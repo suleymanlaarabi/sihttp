@@ -114,7 +114,22 @@ void sihttp_request_internal_init(sihttp_request_internal_t *req) {
 
 void sihttp_request_internal_fini(sihttp_request_internal_t *req) {
     free(req->storage);
+    free(req->header_storage);
     sihttp_request_internal_init(req);
+}
+
+int sihttp_request_set_target(sihttp_request_internal_t *req, char *target) {
+    char *query;
+    if (!target || target[0] != '/') {
+        return -1;
+    }
+    req->public_req.path = target;
+    query = strchr(target, '?');
+    if (query) {
+        *query++ = '\0';
+        sihttp_parse_query(req, query);
+    }
+    return 0;
 }
 
 int sihttp_request_add_param(sihttp_request_internal_t *req, const char *name, const char *value) {
@@ -257,6 +272,10 @@ sihttp_parse_result_t sihttp_request_parse_state_with_limit(
         return result;
     }
 
+    if (content_length > SIZE_MAX - header_len) {
+        result.code = 413;
+        return result;
+    }
     result.expected_len = header_len + content_length;
     if (len >= result.expected_len) {
         result.code = 200;
@@ -282,7 +301,7 @@ int sihttp_request_parse_with_limit(
     char *method;
     char *target;
     char *version;
-    char *query;
+    char *line;
     int method_ok = 0;
 
     sihttp_request_internal_init(req);
@@ -307,7 +326,6 @@ int sihttp_request_parse_with_limit(
     }
 
     body = headers_end + 4;
-    *headers_end = '\0';
 
     request_line_end = strstr(req->storage, "\r\n");
     if (!request_line_end) {
@@ -332,11 +350,37 @@ int sihttp_request_parse_with_limit(
         return 400;
     }
 
-    query = strchr(target, '?');
-    if (query) {
-        *query++ = '\0';
-        sihttp_parse_query(req, query);
+    if (sihttp_request_set_target(req, target) != 0) {
+        return 400;
     }
+
+    line = request_line_end + 2;
+    while (line < headers_end) {
+        char *line_end = strstr(line, "\r\n");
+        char *colon;
+        char *name;
+        char *value;
+        if (!line_end) {
+            break;
+        }
+        *line_end = '\0';
+        if (req->header_count >= SIHTTP_MAX_HEADERS) {
+            return 400;
+        }
+        colon = strchr(line, ':');
+        if (!colon) {
+            return 400;
+        }
+        *colon++ = '\0';
+        name = sihttp_trim(line);
+        value = sihttp_trim(colon);
+        if (!*name) {
+            return 400;
+        }
+        req->headers[req->header_count++] = (sihttp_pair_t){name, value};
+        line = line_end + 2;
+    }
+    *headers_end = '\0';
 
     sihttp_method_from_name(method, &method_ok);
     if (!method_ok) {
@@ -344,7 +388,6 @@ int sihttp_request_parse_with_limit(
     }
 
     req->public_req.method = method;
-    req->public_req.path = target;
     req->public_req.body = body;
     req->public_req.body_size = state_result.expected_len - (size_t)(body - req->storage);
     req->public_req.state = state;
@@ -360,38 +403,79 @@ int sihttp_request_parse(
     return sihttp_request_parse_with_limit(req, data, len, state, SIHTTP_MAX_BODY_BYTES);
 }
 
-SIHTTP_API int64_t sihttp_param(const sihttp_request_t *public_req, const char *name) {
+static const char *sihttp_pair_get(const sihttp_pair_t *pairs, size_t count, const char *name, bool icase) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (icase ? sihttp_streq_icase(pairs[i].name, name) : strcmp(pairs[i].name, name) == 0) {
+            return pairs[i].value;
+        }
+    }
+    return NULL;
+}
+
+SIHTTP_API const char *sihttp_path_param(const sihttp_request_t *public_req, const char *name) {
+    if (!public_req) return NULL;
     const sihttp_request_internal_t *req = (const sihttp_request_internal_t *)public_req;
+    return sihttp_pair_get(req->params, req->param_count, name, false);
+}
 
-    for (size_t i = 0; i < req->param_count; i++) {
-        if (strcmp(req->params[i].name, name) == 0) {
-            return strtoll(req->params[i].value, NULL, 10);
-        }
+SIHTTP_API const char *sihttp_query(const sihttp_request_t *public_req, const char *name) {
+    if (!public_req) return NULL;
+    const sihttp_request_internal_t *req = (const sihttp_request_internal_t *)public_req;
+    return sihttp_pair_get(req->query, req->query_count, name, false);
+}
+
+SIHTTP_API const char *sihttp_header(const sihttp_request_t *public_req, const char *name) {
+    if (!public_req) return NULL;
+    const sihttp_request_internal_t *req = (const sihttp_request_internal_t *)public_req;
+    return sihttp_pair_get(req->headers, req->header_count, name, true);
+}
+
+static bool sihttp_parse_u64_strict(const char *value, uint64_t max, uint64_t *out) {
+    uint64_t parsed = 0;
+    if (!value || !*value || !out) return false;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        unsigned digit = *p - '0';
+        if (parsed > (max - digit) / 10) return false;
+        parsed = parsed * 10 + digit;
     }
+    *out = parsed;
+    return true;
+}
 
-    for (size_t i = 0; i < req->query_count; i++) {
-        if (strcmp(req->query[i].name, name) == 0) {
-            return strtoll(req->query[i].value, NULL, 10);
-        }
-    }
+SIHTTP_API bool sihttp_path_param_u32(const sihttp_request_t *req, const char *name, uint32_t *out) {
+    uint64_t parsed;
+    if (!sihttp_parse_u64_strict(sihttp_path_param(req, name), UINT32_MAX, &parsed) || !out) return false;
+    *out = (uint32_t)parsed;
+    return true;
+}
 
-    const char *query = strchr(req->public_req.path, '?');
-    if (query) {
-        size_t name_len = strlen(name);
-        query++;
-        while (*query) {
-            const char *value = strchr(query, '=');
-            const char *end = strchr(query, '&');
-            if (!end) {
-                end = query + strlen(query);
-            }
-            if (value && value < end && (size_t)(value - query) == name_len &&
-                memcmp(query, name, name_len) == 0) {
-                return strtoll(value + 1, NULL, 10);
-            }
-            query = *end ? end + 1 : end;
-        }
-    }
+SIHTTP_API bool sihttp_path_param_u16(const sihttp_request_t *req, const char *name, uint16_t *out) {
+    uint64_t parsed;
+    if (!sihttp_parse_u64_strict(sihttp_path_param(req, name), UINT16_MAX, &parsed) || !out) return false;
+    *out = (uint16_t)parsed;
+    return true;
+}
 
-    return 0;
+SIHTTP_API bool sihttp_query_u32(const sihttp_request_t *req, const char *name, uint32_t *out) {
+    uint64_t parsed;
+    if (!sihttp_parse_u64_strict(sihttp_query(req, name), UINT32_MAX, &parsed) || !out) return false;
+    *out = (uint32_t)parsed;
+    return true;
+}
+
+SIHTTP_API bool sihttp_query_bool(const sihttp_request_t *req, const char *name, bool *out) {
+    const char *value = sihttp_query(req, name);
+    if (!value || !out) return false;
+    if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) { *out = true; return true; }
+    if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) { *out = false; return true; }
+    return false;
+}
+
+SIHTTP_API int64_t sihttp_param(const sihttp_request_t *public_req, const char *name) {
+    const char *value = sihttp_path_param(public_req, name);
+    uint64_t parsed;
+    if (!sihttp_parse_u64_strict(value, INT64_MAX, &parsed)) return 0;
+    return (int64_t)parsed;
 }
