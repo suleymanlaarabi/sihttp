@@ -564,10 +564,19 @@ void sireflect_error_set(const char *message);
 #endif
 
 typedef struct sireflect_registry_t sireflect_registry_t;
+typedef struct {
+    sireflect_metas_t view;
+} sireflect_meta_store_t;
+typedef struct {
+    sireflect_type_info_t info;
+    sireflect_meta_store_t type_meta;
+    sireflect_meta_store_t *field_meta;
+} sireflect_type_entry_t;
 
 struct sireflect_registry_t {
     sicore_vec_t types;
     sicore_map_t types_by_name;
+    sireflect_handle_t first_handle;
 };
 
 sireflect_registry_t *sireflect_registry_current(void);
@@ -601,6 +610,10 @@ sireflect_handle_t sireflect_registry_handle_by_name(const char *name);
 sireflect_type_info_t *sireflect_registry_type_at(sireflect_handle_t handle);
 
 const sireflect_type_info_t *sireflect_registry_const_type_at(sireflect_handle_t handle);
+sireflect_type_entry_t *sireflect_registry_entry_at(sireflect_handle_t handle);
+void sireflect_registry_rollback(size_t count);
+bool sireflect_registry_finish_struct(sireflect_handle_t handle,
+    sireflect_field_info_t *fields, size_t field_count, size_t size, size_t align);
 
 #endif
 
@@ -779,21 +792,22 @@ sireflect_handle_t sireflect_register_enum(const sireflect_enum_desc_t *desc) {
 }
 
 static char *sireflect_current_error = NULL;
+static bool sireflect_error_owned = false;
+static char sireflect_out_of_memory_error[] = "failed to allocate error message";
 
 static char *sireflect_error_dup(const char *message) {
     sireflect_assert(message != NULL, "error message must not be NULL");
 
     const size_t len = strlen(message);
     char *copy = malloc(len + 1);
-    sireflect_assert(copy != NULL, "failed to allocate error message");
-
-    memcpy(copy, message, len + 1);
+    if (copy != NULL) memcpy(copy, message, len + 1);
     return copy;
 }
 
 void sireflect_error_clear(void) {
-    free(sireflect_current_error);
+    if (sireflect_error_owned) free(sireflect_current_error);
     sireflect_current_error = NULL;
+    sireflect_error_owned = false;
 }
 
 void sireflect_error_set(const char *message) {
@@ -804,10 +818,232 @@ void sireflect_error_set(const char *message) {
     }
 
     sireflect_current_error = sireflect_error_dup(message);
+    if (sireflect_current_error == NULL) {
+        sireflect_current_error = sireflect_out_of_memory_error;
+    } else {
+        sireflect_error_owned = true;
+    }
 }
 
 const char *sireflect_error(void) {
     return sireflect_current_error;
+}
+
+#include <stdint.h>
+
+static sireflect_category_t category_of(sireflect_handle_t type) {
+    sireflect_type_entry_t *entry = sireflect_registry_entry_at(type);
+    if (entry == NULL) return sireflect_category_invalid;
+    switch (entry->info.kind) {
+    case sireflect_kind_bool: return sireflect_category_boolean;
+    case sireflect_kind_f32:
+    case sireflect_kind_f64: return sireflect_category_floating;
+    case sireflect_kind_enum: return sireflect_category_enum;
+    case sireflect_kind_struct: return sireflect_category_struct;
+    case sireflect_kind_array: return sireflect_category_array;
+    case sireflect_kind_function_pointer: return sireflect_category_function_pointer;
+    case sireflect_kind_ptr: return sireflect_category_pointer;
+    case sireflect_kind_pointer: {
+        sireflect_type_entry_t *pointee = sireflect_registry_entry_at(entry->info.element_type);
+        return pointee != NULL && pointee->info.kind == sireflect_kind_char
+            ? sireflect_category_cstring : sireflect_category_pointer;
+    }
+    default: return sireflect_category_integer;
+    }
+}
+
+sireflect_category_t sireflect_type_category(sireflect_handle_t type) {
+    sireflect_error_clear();
+    return category_of(type);
+}
+
+bool sireflect_type_is_numeric_handle(sireflect_handle_t type) {
+    sireflect_error_clear();
+    sireflect_category_t category = category_of(type);
+    return category == sireflect_category_integer || category == sireflect_category_floating;
+}
+
+bool sireflect_type_is_scalar(sireflect_handle_t type) {
+    sireflect_error_clear();
+    sireflect_category_t category = category_of(type);
+    return category == sireflect_category_boolean || category == sireflect_category_integer ||
+        category == sireflect_category_floating || category == sireflect_category_enum;
+}
+
+bool sireflect_type_is_cstring(sireflect_handle_t type) {
+    sireflect_error_clear();
+    return category_of(type) == sireflect_category_cstring;
+}
+
+bool sireflect_type_is_integral(sireflect_handle_t type) {
+    sireflect_error_clear();
+    return category_of(type) == sireflect_category_integer;
+}
+
+bool sireflect_type_is_floating(sireflect_handle_t type) {
+    sireflect_error_clear();
+    return category_of(type) == sireflect_category_floating;
+}
+
+bool sireflect_type_is_function_pointer(sireflect_handle_t type) {
+    sireflect_error_clear();
+    return category_of(type) == sireflect_category_function_pointer;
+}
+
+static const void *array_element(sireflect_handle_t type, const void *array, size_t index) {
+    sireflect_type_entry_t *entry = sireflect_registry_entry_at(type);
+    if (entry == NULL || entry->info.kind != sireflect_kind_array || array == NULL ||
+        index >= entry->info.element_count) return NULL;
+    sireflect_type_entry_t *element = sireflect_registry_entry_at(entry->info.element_type);
+    if (element == NULL || element->info.size == 0 ||
+        entry->info.element_count > entry->info.size / element->info.size) return NULL;
+    return (const unsigned char *)array + index * element->info.size;
+}
+
+const void *sireflect_array_element_ptr(sireflect_handle_t array_type,
+    const void *array, size_t index) {
+    sireflect_error_clear();
+    return array_element(array_type, array, index);
+}
+
+void *sireflect_array_element_mut_ptr(sireflect_handle_t array_type,
+    void *array, size_t index) {
+    sireflect_error_clear();
+    return (void *)array_element(array_type, array, index);
+}
+
+bool sireflect_enum_value_valid(sireflect_handle_t type, int64_t value) {
+    sireflect_error_clear();
+    sireflect_type_entry_t *entry = sireflect_registry_entry_at(type);
+    if (entry == NULL || entry->info.kind != sireflect_kind_enum) return false;
+    for (size_t i = 0; i < entry->info.enum_values.value_count; i++) {
+        if (entry->info.enum_values.values[i].value == value) return true;
+    }
+    return false;
+}
+
+static char *dup_string(const char *src) {
+    size_t len = strlen(src);
+    char *copy = malloc(len + 1);
+    if (copy != NULL) memcpy(copy, src, len + 1);
+    return copy;
+}
+
+static const sireflect_meta_t *find_meta(const sireflect_meta_store_t *store, const char *key) {
+    for (size_t i = 0; i < store->view.count; i++) {
+        if (strcmp(store->view.items[i]->key, key) == 0) return store->view.items[i];
+    }
+    return NULL;
+}
+
+static bool set_meta(sireflect_meta_store_t *store, const sireflect_meta_t *meta) {
+    if (meta == NULL || meta->key == NULL || meta->key[0] == '\0' ||
+        meta->kind < SIREFLECT_META_STRING || meta->kind > SIREFLECT_META_F64 ||
+        (meta->kind == SIREFLECT_META_STRING && meta->value.string == NULL)) {
+        sireflect_error_set("invalid metadata value or key");
+        return false;
+    }
+    char *key = dup_string(meta->key);
+    char *string = meta->kind == SIREFLECT_META_STRING ? dup_string(meta->value.string) : NULL;
+    if (key == NULL || (meta->kind == SIREFLECT_META_STRING && string == NULL)) {
+        free(key);
+        free(string);
+        sireflect_error_set("failed to allocate metadata");
+        return false;
+    }
+    sireflect_meta_t *existing = (sireflect_meta_t *)find_meta(store, meta->key);
+    if (existing != NULL) {
+        free((char *)existing->key);
+        if (existing->kind == SIREFLECT_META_STRING) free((char *)existing->value.string);
+        *existing = *meta;
+        existing->key = key;
+        if (meta->kind == SIREFLECT_META_STRING) existing->value.string = string;
+        return true;
+    }
+    sireflect_meta_t *item = malloc(sizeof(*item));
+    if (item == NULL) {
+        free(key);
+        free(string);
+        sireflect_error_set("failed to allocate metadata");
+        return false;
+    }
+    *item = *meta;
+    item->key = key;
+    if (meta->kind == SIREFLECT_META_STRING) item->value.string = string;
+    if (store->view.count == SIZE_MAX / sizeof(*store->view.items)) {
+        free(item);
+        free(key);
+        free(string);
+        sireflect_error_set("metadata list is too large");
+        return false;
+    }
+    const sireflect_meta_t **items = realloc((void *)store->view.items,
+        (store->view.count + 1) * sizeof(*items));
+    if (items == NULL) {
+        free(item);
+        free(key);
+        free(string);
+        sireflect_error_set("failed to allocate metadata list");
+        return false;
+    }
+    store->view.items = items;
+    items[store->view.count++] = item;
+    return true;
+}
+
+static sireflect_meta_store_t *type_store(sireflect_handle_t type) {
+    sireflect_type_entry_t *entry = sireflect_registry_entry_at(type);
+    return entry == NULL ? NULL : &entry->type_meta;
+}
+
+static sireflect_meta_store_t *field_store(sireflect_handle_t type, const char *field) {
+    sireflect_type_entry_t *entry = sireflect_registry_entry_at(type);
+    if (entry == NULL || field == NULL) return NULL;
+    for (size_t i = 0; i < entry->info.fields.field_count; i++) {
+        if (strcmp(entry->info.fields.fields[i].name, field) == 0) return &entry->field_meta[i];
+    }
+    return NULL;
+}
+
+bool sireflect_type_set_meta(sireflect_handle_t type, const sireflect_meta_t *meta) {
+    sireflect_error_clear();
+    sireflect_meta_store_t *store = type_store(type);
+    if (store == NULL) { sireflect_error_set("invalid metadata type"); return false; }
+    return set_meta(store, meta);
+}
+
+const sireflect_meta_t *sireflect_type_meta(sireflect_handle_t type, const char *key) {
+    sireflect_error_clear();
+    sireflect_meta_store_t *store = type_store(type);
+    return store == NULL || key == NULL ? NULL : find_meta(store, key);
+}
+
+const sireflect_metas_t *sireflect_type_metas(sireflect_handle_t type) {
+    sireflect_error_clear();
+    sireflect_meta_store_t *store = type_store(type);
+    return store == NULL ? NULL : &store->view;
+}
+
+bool sireflect_field_set_meta(sireflect_handle_t type, const char *field,
+    const sireflect_meta_t *meta) {
+    sireflect_error_clear();
+    sireflect_meta_store_t *store = field_store(type, field);
+    if (store == NULL) { sireflect_error_set("unknown metadata field or type"); return false; }
+    return set_meta(store, meta);
+}
+
+const sireflect_meta_t *sireflect_field_meta(sireflect_handle_t type,
+    const char *field, const char *key) {
+    sireflect_error_clear();
+    sireflect_meta_store_t *store = field_store(type, field);
+    return store == NULL || key == NULL ? NULL : find_meta(store, key);
+}
+
+const sireflect_metas_t *sireflect_field_metas(sireflect_handle_t type,
+    const char *field) {
+    sireflect_error_clear();
+    sireflect_meta_store_t *store = field_store(type, field);
+    return store == NULL ? NULL : &store->view;
 }
 
 const sireflect_field_info_t *
@@ -911,7 +1147,6 @@ bool sireflect_parse_struct_fields(
 
 #endif
 
-#include <stdint.h>
 #include <stdio.h>
 
 #define SIREFLECT_MAX_ARRAY_DIMS 16
@@ -1680,6 +1915,12 @@ static inline void sireflect_parse_declarator(
         return;
     }
 
+    if (!is_pointer && !is_function_pointer &&
+        strcmp(sireflect_registry_const_type_at(field_type)->name, parser->struct_name) == 0) {
+        sireflect_parser_fail_at(parser, name_token, "recursive field must be a pointer");
+        return;
+    }
+
     if (is_function_pointer) {
         field_type = sireflect_registry_get_or_add_function_pointer_type(field_type);
     } else if (is_pointer) {
@@ -1872,6 +2113,7 @@ bool sireflect_parse_struct_fields(
 
 static sireflect_registry_t sireflect_global_registry;
 static size_t sireflect_global_references;
+static sireflect_handle_t sireflect_next_handle = 1;
 
 bool sireflect_registry_is_initialized(void) {
     return sireflect_global_references != 0;
@@ -1924,12 +2166,12 @@ sireflect_format_array_type_name(const sireflect_type_info_t *element, size_t el
 }
 
 static sireflect_handle_t sireflect_handle_from_index(size_t index) {
-    return (sireflect_handle_t)(index + 1);
+    return sireflect_global_registry.first_handle + (sireflect_handle_t)index;
 }
 
 static size_t sireflect_index_from_handle(sireflect_handle_t handle) {
-    sireflect_assert(handle != SIREFLECT_INVALID_HANDLE, "type handle must be valid");
-    return (size_t)(handle - 1);
+    sireflect_assert(handle >= sireflect_global_registry.first_handle, "type handle must be valid");
+    return (size_t)(handle - sireflect_global_registry.first_handle);
 }
 
 sireflect_handle_t sireflect_registry_add_type(
@@ -1948,7 +2190,9 @@ sireflect_handle_t sireflect_registry_add_type(
     sireflect_assert(size != 0 || kind == sireflect_kind_struct, "non-struct type size must not be zero");
     sireflect_assert(align != 0, "type alignment must not be zero");
 
-    const sireflect_type_info_t type = {
+    sireflect_type_entry_t *entry = calloc(1, sizeof(*entry));
+    sireflect_assert(entry != NULL, "failed to allocate type entry");
+    entry->info = (sireflect_type_info_t){
         .name = sireflect_dup_cstr(name),
         .kind = kind,
         .size = size,
@@ -1966,10 +2210,14 @@ sireflect_handle_t sireflect_registry_add_type(
         .element_type = SIREFLECT_INVALID_HANDLE,
         .element_count = 0,
     };
-    sicore_vec_push(&reg->types, &type, sizeof(type));
+    if (field_count != 0) {
+        entry->field_meta = calloc(field_count, sizeof(*entry->field_meta));
+        sireflect_assert(entry->field_meta != NULL, "failed to allocate field metadata stores");
+    }
+    sicore_vec_push(&reg->types, &entry, sizeof(entry));
 
     const uint32_t index = reg->types.size - 1;
-    sicore_map_set(&reg->types_by_name, type.name, index);
+    sicore_map_set(&reg->types_by_name, entry->info.name, index);
 
     return sireflect_handle_from_index((size_t)index);
 }
@@ -2140,7 +2388,8 @@ void sireflect_init(void) {
 
     if (sireflect_global_references == 0) {
         sireflect_global_references = 1;
-        sicore_vec_init(&sireflect_global_registry.types, sizeof(sireflect_type_info_t));
+        sireflect_global_registry.first_handle = sireflect_next_handle;
+        sicore_vec_init(&sireflect_global_registry.types, sizeof(sireflect_type_entry_t *));
         sicore_map_init(&sireflect_global_registry.types_by_name);
         sireflect_register_builtin_types();
         return;
@@ -2150,25 +2399,77 @@ void sireflect_init(void) {
     sireflect_global_references++;
 }
 
+static void sireflect_meta_store_clear(sireflect_meta_store_t *store) {
+    for (size_t i = 0; i < store->view.count; i++) {
+        sireflect_meta_t *meta = (sireflect_meta_t *)store->view.items[i];
+        free((char *)meta->key);
+        if (meta->kind == SIREFLECT_META_STRING) free((char *)meta->value.string);
+        free(meta);
+    }
+    free((void *)store->view.items);
+}
+
+static void sireflect_entry_clear(sireflect_type_entry_t *entry) {
+    sireflect_type_info_t *type = &entry->info;
+
+    free((char *)type->name);
+
+    for (size_t f = 0; f < type->fields.field_count; f++) {
+        free((char *)type->fields.fields[f].name);
+    }
+
+    free(type->fields.fields);
+
+    for (size_t e = 0; e < type->enum_values.value_count; e++) {
+        free((char *)type->enum_values.values[e].name);
+    }
+    free(type->enum_values.values);
+    sireflect_meta_store_clear(&entry->type_meta);
+    for (size_t f = 0; f < type->fields.field_count; f++) {
+        sireflect_meta_store_clear(&entry->field_meta[f]);
+    }
+    free(entry->field_meta);
+    free(entry);
+}
+
+void sireflect_registry_rollback(size_t count) {
+    sireflect_registry_t *reg = &sireflect_global_registry;
+    while (reg->types.size > count) {
+        const uint32_t index = reg->types.size - 1;
+        sireflect_type_entry_t *entry = *sicore_vec_get_mut(&reg->types, index, sireflect_type_entry_t *);
+        sireflect_entry_clear(entry);
+        reg->types.size--;
+    }
+    sicore_map_fini(&reg->types_by_name);
+    sicore_map_init(&reg->types_by_name);
+    for (uint32_t i = 0; i < reg->types.size; i++) {
+        sireflect_type_entry_t *entry = *sicore_vec_get_mut(&reg->types, i, sireflect_type_entry_t *);
+        sicore_map_set(&reg->types_by_name, entry->info.name, i);
+    }
+}
+
+bool sireflect_registry_finish_struct(sireflect_handle_t handle,
+    sireflect_field_info_t *fields, size_t field_count, size_t size, size_t align) {
+    sireflect_type_entry_t *entry = sireflect_registry_entry_at(handle);
+    sireflect_meta_store_t *stores = field_count ? calloc(field_count, sizeof(*stores)) : NULL;
+    if (field_count && stores == NULL) {
+        return false;
+    }
+    entry->info.fields = (sireflect_fields_t){ .fields = fields, .field_count = field_count };
+    entry->info.size = size;
+    entry->info.align = align;
+    entry->field_meta = stores;
+    return true;
+}
+
 static void sireflect_registry_clear(void) {
     sireflect_registry_t *reg = &sireflect_global_registry;
-
     for (uint32_t i = 0; i < reg->types.size; i++) {
-        sireflect_type_info_t *type = sicore_vec_get_mut(&reg->types, i, sireflect_type_info_t);
-
-        free((char *)type->name);
-
-        for (size_t f = 0; f < type->fields.field_count; f++) {
-            free((char *)type->fields.fields[f].name);
-        }
-
-        free(type->fields.fields);
-
-        for (size_t e = 0; e < type->enum_values.value_count; e++) {
-            free((char *)type->enum_values.values[e].name);
-        }
-        free(type->enum_values.values);
+        sireflect_type_entry_t *entry = *sicore_vec_get_mut(&reg->types, i, sireflect_type_entry_t *);
+        sireflect_entry_clear(entry);
     }
+
+    sireflect_next_handle = reg->first_handle + reg->types.size;
 
     sicore_map_fini(&reg->types_by_name);
     sicore_vec_fini(&reg->types);
@@ -2215,11 +2516,51 @@ const sireflect_type_info_t *sireflect_registry_const_type_at(sireflect_handle_t
     const size_t index = sireflect_index_from_handle(handle);
     sireflect_assert(index < reg->types.size, "type handle is out of range");
 
-    return sicore_vec_get(&reg->types, index, sireflect_type_info_t);
+    const sireflect_type_entry_t *entry = *sicore_vec_get(&reg->types, index, sireflect_type_entry_t *);
+    return &entry->info;
+}
+
+sireflect_type_entry_t *sireflect_registry_entry_at(sireflect_handle_t handle) {
+    if (!sireflect_registry_is_initialized() ||
+        handle < sireflect_global_registry.first_handle ||
+        handle - sireflect_global_registry.first_handle >= sireflect_global_registry.types.size) {
+        return NULL;
+    }
+    return *sicore_vec_get_mut(&sireflect_global_registry.types,
+        (uint32_t)(handle - sireflect_global_registry.first_handle), sireflect_type_entry_t *);
 }
 
 sireflect_type_info_t *sireflect_registry_type_at(sireflect_handle_t handle) {
     return (sireflect_type_info_t *)sireflect_registry_const_type_at(handle);
+}
+
+static sireflect_handle_t sireflect_register_new_struct(
+    const char *name, const char *source, size_t size, size_t align,
+    bool validate_layout, bool fail_fast
+) {
+    sireflect_registry_t *reg = sireflect_registry_current();
+    const size_t checkpoint = reg->types.size;
+    sireflect_handle_t handle = sireflect_registry_add_type(
+        name, sireflect_kind_struct, size, align, NULL, 0, NULL, 0
+    );
+    sireflect_field_info_t *fields = NULL;
+    size_t field_count = 0;
+    size_t parsed_size = 0;
+    size_t parsed_align = 0;
+    if (!sireflect_parse_struct_fields(name, source, &fields, &field_count,
+        size, align, &parsed_size, &parsed_align, validate_layout, fail_fast)) {
+        sireflect_registry_rollback(checkpoint);
+        return SIREFLECT_INVALID_HANDLE;
+    }
+    if (!sireflect_registry_finish_struct(handle, fields, field_count,
+        validate_layout ? size : parsed_size, validate_layout ? align : parsed_align)) {
+        for (size_t i = 0; i < field_count; i++) free((char *)fields[i].name);
+        free(fields);
+        sireflect_registry_rollback(checkpoint);
+        sireflect_error_set("failed to allocate field metadata stores");
+        return SIREFLECT_INVALID_HANDLE;
+    }
+    return handle;
 }
 
 sireflect_handle_t
@@ -2246,36 +2587,8 @@ sireflect_try_register_struct(const sireflect_struct_desc_t *desc) {
         return existing;
     }
 
-    sireflect_field_info_t *parsed_fields = NULL;
-    size_t field_count = 0;
-    size_t parsed_size = 0;
-    size_t parsed_align = 0;
-
-    if (!sireflect_parse_struct_fields(
-        desc->name,
-        desc->fields,
-        &parsed_fields,
-        &field_count,
-        desc->size,
-        desc->align,
-        &parsed_size,
-        &parsed_align,
-        true,
-        false
-    )) {
-        return SIREFLECT_INVALID_HANDLE;
-    }
-
-    return sireflect_registry_add_type(
-        desc->name,
-        sireflect_kind_struct,
-        desc->size,
-        desc->align,
-        parsed_fields,
-        field_count,
-        NULL,
-        0
-    );
+    return sireflect_register_new_struct(desc->name, desc->fields,
+        desc->size, desc->align, true, false);
 }
 
 sireflect_handle_t
@@ -2310,34 +2623,8 @@ sireflect_register_struct(const sireflect_struct_desc_t *desc) {
             return existing;
         }
 
-        sireflect_field_info_t *parsed_fields = NULL;
-        size_t field_count = 0;
-        size_t parsed_size = 0;
-        size_t parsed_align = 0;
-
-        if (sireflect_parse_struct_fields(
-                desc->name,
-                desc->fields,
-                &parsed_fields,
-                &field_count,
-                desc->size,
-                desc->align,
-                &parsed_size,
-                &parsed_align,
-                true,
-                true
-            )) {
-            handle = sireflect_registry_add_type(
-                desc->name,
-                sireflect_kind_struct,
-                desc->size,
-                desc->align,
-                parsed_fields,
-                field_count,
-                NULL,
-                0
-            );
-        }
+        handle = sireflect_register_new_struct(desc->name, desc->fields,
+            desc->size, desc->align, true, true);
     }
 
     sireflect_assert(handle != SIREFLECT_INVALID_HANDLE, "failed to register struct");
@@ -2367,36 +2654,7 @@ sireflect_handle_t sireflect_try_register_dynamic_struct(
         return existing;
     }
 
-    sireflect_field_info_t *parsed_fields = NULL;
-    size_t field_count = 0;
-    size_t size = 0;
-    size_t align = 0;
-
-    if (!sireflect_parse_struct_fields(
-            name,
-            fields,
-            &parsed_fields,
-            &field_count,
-            0,
-            1,
-            &size,
-            &align,
-            false,
-            false
-        )) {
-        return SIREFLECT_INVALID_HANDLE;
-    }
-
-    return sireflect_registry_add_type(
-        name,
-        sireflect_kind_struct,
-        size,
-        align,
-        parsed_fields,
-        field_count,
-        NULL,
-        0
-    );
+    return sireflect_register_new_struct(name, fields, 0, 1, false, false);
 }
 
 const char *sireflect_kind_name(sireflect_kind_t kind) {
@@ -2622,6 +2880,191 @@ sireflect_type_pointee(sireflect_handle_t ref) {
         "type must be a typed pointer"
     );
     return type->element_type;
+}
+
+#define SIREFLECT_WALK_MAX_DEPTH 256
+
+typedef enum { walk_types, walk_const_values, walk_mut_values } walk_mode_t;
+
+typedef struct {
+    walk_mode_t mode;
+    uint32_t flags;
+    void *user;
+    sireflect_type_visitor_t type_visitor;
+    sireflect_const_value_visitor_t const_visitor;
+    sireflect_value_visitor_t mut_visitor;
+    sireflect_handle_t active[SIREFLECT_WALK_MAX_DEPTH + 1];
+    unsigned char *seen;
+    sireflect_handle_t first_handle;
+} walk_state_t;
+
+static bool emit_value(walk_state_t *state, sireflect_value_event_t event,
+    sireflect_handle_t type, const sireflect_type_info_t *info,
+    const sireflect_field_info_t *field, const void *ptr, void *mut_ptr,
+    size_t index, size_t depth) {
+    if (state->mode == walk_const_values) {
+        sireflect_const_value_visit_t visit = {
+            .event = event, .type = type, .info = info, .field = field,
+            .ptr = ptr, .index = index, .depth = depth
+        };
+        return state->const_visitor(&visit, state->user);
+    }
+    sireflect_value_visit_t visit = {
+        .event = event, .type = type, .info = info, .field = field,
+        .ptr = mut_ptr, .index = index, .depth = depth
+    };
+    return state->mut_visitor(&visit, state->user);
+}
+
+static bool walk_node(walk_state_t *state, sireflect_handle_t type,
+    sireflect_walk_relation_t relation, const sireflect_field_info_t *field,
+    sireflect_handle_t parent, const void *ptr, void *mut_ptr,
+    size_t index, size_t depth) {
+    sireflect_type_entry_t *entry = sireflect_registry_entry_at(type);
+    if (entry == NULL) {
+        sireflect_error_set("invalid type in reflection graph");
+        return false;
+    }
+    if (depth > SIREFLECT_WALK_MAX_DEPTH) {
+        sireflect_error_set("reflection walk depth limit exceeded");
+        return false;
+    }
+    const sireflect_type_info_t *info = &entry->info;
+    if (state->mode == walk_types) {
+        for (size_t i = 0; i < depth; i++) {
+            if (state->active[i] == type) return true;
+        }
+        if (state->seen != NULL) {
+            size_t slot = (size_t)(type - state->first_handle);
+            if (state->seen[slot]) return true;
+            state->seen[slot] = 1;
+        }
+        state->active[depth] = type;
+        sireflect_type_visit_t visit = {
+            .type = type, .info = info, .relation = relation,
+            .field = field, .parent_type = parent, .depth = depth
+        };
+        if (!state->type_visitor(&visit, state->user)) return false;
+    } else {
+        sireflect_value_event_t event = SIREFLECT_VALUE_LEAF;
+        if (info->kind == sireflect_kind_struct) event = SIREFLECT_VALUE_ENTER_STRUCT;
+        else if (info->kind == sireflect_kind_array) event = SIREFLECT_VALUE_ENTER_ARRAY;
+        else if (info->kind == sireflect_kind_pointer || info->kind == sireflect_kind_ptr ||
+            info->kind == sireflect_kind_function_pointer) event = SIREFLECT_VALUE_POINTER;
+        else event = SIREFLECT_VALUE_LEAF;
+        if (!emit_value(state, event, type, info, field, ptr, mut_ptr, index, depth)) return false;
+    }
+
+    if (info->kind == sireflect_kind_struct) {
+        for (size_t i = 0; i < info->fields.field_count; i++) {
+            if (depth == SIREFLECT_WALK_MAX_DEPTH) {
+                sireflect_error_set("reflection walk depth limit exceeded");
+                return false;
+            }
+            const sireflect_field_info_t *child = &info->fields.fields[i];
+            if (child->offset > info->size || child->size > info->size - child->offset) {
+                sireflect_error_set("invalid reflected field bounds");
+                return false;
+            }
+            const void *child_ptr = ptr ? (const unsigned char *)ptr + child->offset : NULL;
+            void *child_mut_ptr = mut_ptr ? (unsigned char *)mut_ptr + child->offset : NULL;
+            sireflect_type_entry_t *child_entry = sireflect_registry_entry_at(child->type);
+            if (child_entry == NULL) {
+                sireflect_error_set("invalid reflected field type");
+                return false;
+            }
+            if (state->mode != walk_types &&
+                !emit_value(state, SIREFLECT_VALUE_FIELD, child->type,
+                    &child_entry->info, child,
+                    child_ptr, child_mut_ptr, 0, depth + 1)) return false;
+            if (!walk_node(state, child->type, SIREFLECT_WALK_FIELD, child, type,
+                child_ptr, child_mut_ptr, 0, depth + 1)) return false;
+        }
+        if (state->mode != walk_types &&
+            !emit_value(state, SIREFLECT_VALUE_LEAVE_STRUCT, type, info, field,
+                ptr, mut_ptr, index, depth)) return false;
+    } else if (info->kind == sireflect_kind_array) {
+        sireflect_type_entry_t *element = sireflect_registry_entry_at(info->element_type);
+        if (element == NULL || element->info.size == 0 || info->element_count == 0 ||
+            info->element_count > info->size / element->info.size) {
+            sireflect_error_set("invalid reflected array metadata");
+            return false;
+        }
+        size_t count = state->mode == walk_types ? 1 : info->element_count;
+        for (size_t i = 0; i < count; i++) {
+            if (depth == SIREFLECT_WALK_MAX_DEPTH) {
+                sireflect_error_set("reflection walk depth limit exceeded");
+                return false;
+            }
+            size_t offset = i * element->info.size;
+            const void *child_ptr = ptr ? (const unsigned char *)ptr + offset : NULL;
+            void *child_mut_ptr = mut_ptr ? (unsigned char *)mut_ptr + offset : NULL;
+            if (state->mode != walk_types &&
+                !emit_value(state, SIREFLECT_VALUE_ARRAY_ELEMENT, info->element_type,
+                    &element->info, NULL, child_ptr, child_mut_ptr, i, depth + 1)) return false;
+            if (!walk_node(state, info->element_type, SIREFLECT_WALK_ARRAY_ELEMENT,
+                NULL, type, child_ptr, child_mut_ptr, i, depth + 1)) return false;
+        }
+        if (state->mode != walk_types &&
+            !emit_value(state, SIREFLECT_VALUE_LEAVE_ARRAY, type, info, field,
+                ptr, mut_ptr, index, depth)) return false;
+    } else if (state->mode == walk_types && info->kind == sireflect_kind_pointer &&
+        (state->flags & SIREFLECT_WALK_FOLLOW_POINTERS)) {
+        if (!walk_node(state, info->element_type, SIREFLECT_WALK_POINTER_TARGET,
+            NULL, type, NULL, NULL, 0, depth + 1)) return false;
+    } else if (state->mode == walk_types && info->kind == sireflect_kind_function_pointer) {
+        if (!walk_node(state, info->element_type, SIREFLECT_WALK_FUNCTION_RETURN,
+            NULL, type, NULL, NULL, 0, depth + 1)) return false;
+    }
+    return true;
+}
+
+bool sireflect_walk_type(sireflect_handle_t root, uint32_t flags,
+    sireflect_type_visitor_t visitor, void *user) {
+    sireflect_error_clear();
+    if (visitor == NULL || sireflect_registry_entry_at(root) == NULL ||
+        (flags & ~(SIREFLECT_WALK_FOLLOW_POINTERS | SIREFLECT_WALK_DEDUPLICATE))) {
+        sireflect_error_set("invalid type walk arguments");
+        return false;
+    }
+    walk_state_t state = { .mode = walk_types, .flags = flags,
+        .user = user, .type_visitor = visitor,
+        .first_handle = sireflect_registry_current()->first_handle };
+    if (flags & SIREFLECT_WALK_DEDUPLICATE) {
+        state.seen = calloc(sireflect_registry_current()->types.size, 1);
+        if (state.seen == NULL) {
+            sireflect_error_set("failed to allocate type walk state");
+            return false;
+        }
+    }
+    bool result = walk_node(&state, root, SIREFLECT_WALK_ROOT,
+        NULL, SIREFLECT_INVALID_HANDLE, NULL, NULL, 0, 0);
+    free(state.seen);
+    return result;
+}
+
+static bool walk_value_common(sireflect_handle_t type, const void *value,
+    void *mut_value, uint32_t flags, walk_state_t *state) {
+    sireflect_error_clear();
+    if (sireflect_registry_entry_at(type) == NULL || value == NULL || flags != 0 ||
+        (state->mode == walk_const_values ? state->const_visitor == NULL : state->mut_visitor == NULL)) {
+        sireflect_error_set("invalid value walk arguments");
+        return false;
+    }
+    return walk_node(state, type, SIREFLECT_WALK_ROOT, NULL,
+        SIREFLECT_INVALID_HANDLE, value, mut_value, 0, 0);
+}
+
+bool sireflect_walk_value(sireflect_handle_t type, void *value, uint32_t flags,
+    sireflect_value_visitor_t visitor, void *user) {
+    walk_state_t state = { .mode = walk_mut_values, .user = user, .mut_visitor = visitor };
+    return walk_value_common(type, value, value, flags, &state);
+}
+
+bool sireflect_walk_const_value(sireflect_handle_t type, const void *value, uint32_t flags,
+    sireflect_const_value_visitor_t visitor, void *user) {
+    walk_state_t state = { .mode = walk_const_values, .user = user, .const_visitor = visitor };
+    return walk_value_common(type, value, NULL, flags, &state);
 }
 
 #ifndef SIJSON_INTERNAL_H
@@ -4506,9 +4949,10 @@ typedef struct {
 typedef struct {
     sihttp_request_t public_req;
     char param_names[SIHTTP_MAX_PARAMS][32];
-    char param_values[SIHTTP_MAX_PARAMS][64];
+    char param_values[SIHTTP_MAX_PARAMS][256];
     sihttp_pair_t params[SIHTTP_MAX_PARAMS];
     size_t param_count;
+    int param_error;
     sihttp_pair_t query[SIHTTP_MAX_PARAMS];
     size_t query_count;
     sihttp_pair_t headers[SIHTTP_MAX_HEADERS];
@@ -4531,6 +4975,15 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok);
 void sihttp_request_internal_init(sihttp_request_internal_t *req);
 void sihttp_request_internal_fini(sihttp_request_internal_t *req);
 int sihttp_request_set_target(sihttp_request_internal_t *req, char *target);
+int sihttp_url_decode(char *value, int query);
+int sihttp_header_valid(const char *name, const char *value);
+typedef struct {
+    size_t content_length;
+    const char *length_text;
+    int has_length;
+    int has_host;
+} sihttp_header_state_t;
+int sihttp_request_check_header(sihttp_header_state_t *state, const char *name, const char *value);
 int sihttp_request_add_param(sihttp_request_internal_t *req, const char *name, const char *value);
 int sihttp_request_parse(
     sihttp_request_internal_t *req,
@@ -4553,6 +5006,7 @@ int sihttp_request_parse_with_limit(
 );
 
 void sihttp_response_normalize(sihttp_response_t *response);
+bool sihttp_response_set_managed_header(sihttp_response_t *response, const char *name, const char *value);
 char *sihttp_build_response(sihttp_response_t response, const sihttp_cors_desc_t *cors, size_t *out_len);
 int sihttp_send_response(int fd, sihttp_response_t response, const sihttp_cors_desc_t *cors);
 
@@ -4572,6 +5026,10 @@ sihttp_handler_t sihttp_route_table_match(
     const char *path,
     sihttp_request_internal_t *req,
     int *method_not_allowed
+);
+sihttp_handler_t sihttp_route_table_match_ex(
+    const sihttp_route_table_t *table, sihttp_method_t method, const char *path,
+    sihttp_request_internal_t *req, unsigned *allow_mask
 );
 
 struct sihttp_server_s {
@@ -4595,9 +5053,18 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd);
 #define SIHTTP_ROUTE_H
 
 typedef struct {
+    const char *text;
+    size_t len;
+    bool parameter;
+} sihttp_route_segment_t;
+
+typedef struct {
     sihttp_method_t method;
     char *path;
     sihttp_handler_t callback;
+    sihttp_route_segment_t *segments;
+    size_t segment_count;
+    size_t literal_count;
 } sihttp_route_entry_t;
 
 struct sihttp_route_table_s {
@@ -4640,9 +5107,9 @@ static char sihttp_error_buffer[256];
 
 static char *sihttp_trim_header_value(char *value) {
     char *end;
-    while (*value && isspace((unsigned char)*value)) value++;
+    while (*value == ' ' || *value == '\t') value++;
     end = value + strlen(value);
-    while (end > value && isspace((unsigned char)end[-1])) end--;
+    while (end > value && (end[-1] == ' ' || end[-1] == '\t')) end--;
     *end = '\0';
     return value;
 }
@@ -4687,24 +5154,59 @@ static sihttp_response_t sihttp_dispatch_request(
     sihttp_method_t method,
     sihttp_request_internal_t *req
 ) {
-    int method_not_allowed = 0;
+    unsigned allow_mask = 0;
     sihttp_handler_t handler;
+    sihttp_response_t response;
 
-    handler = sihttp_route_table_match(
+    handler = sihttp_route_table_match_ex(
         server->routes,
         method,
         req->public_req.path,
         req,
-        &method_not_allowed
+        &allow_mask
     );
     if (!handler) {
+        if (req->param_error) return sihttp_response_empty(400);
         if (method == SIHTTP_METHOD_OPTIONS && server->cors.enabled) {
-            return sihttp_response_empty(204);
+            response = sihttp_response_empty(204);
+            goto finish;
         }
-        return sihttp_response_empty(method_not_allowed ? 405 : 404);
+        if (!allow_mask) {
+            response = sihttp_response_empty(404);
+            goto finish;
+        }
+        response = sihttp_response_empty(405);
+        char allow[64] = {0};
+        const sihttp_method_t order[] = {SIHTTP_METHOD_GET, SIHTTP_METHOD_HEAD,
+            SIHTTP_METHOD_POST, SIHTTP_METHOD_PUT, SIHTTP_METHOD_PATCH,
+            SIHTTP_METHOD_DELETE, SIHTTP_METHOD_OPTIONS};
+        size_t used = 0;
+        for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+            if (!(allow_mask & (1u << order[i]))) continue;
+            const char *name = sihttp_method_name(order[i]);
+            int n = snprintf(allow + used, sizeof(allow) - used, "%s%s", used ? ", " : "", name);
+            used += (size_t)n;
+        }
+        if (!sihttp_response_set_header(&response, "Allow", allow)) response = sihttp_response_empty(500);
+        goto finish;
     }
 
-    return handler(&req->public_req);
+    response = handler(&req->public_req);
+finish:
+    sihttp_response_normalize(&response);
+    if (method == SIHTTP_METHOD_HEAD) {
+        char length[32];
+        snprintf(length, sizeof(length), "%zu", response.body ? response.body_size : 0);
+        if (!sihttp_response_set_managed_header(&response, "Content-Length", length)) {
+            sihttp_response_fini(&response);
+            return sihttp_response_empty(500);
+        }
+        free(response.body);
+        response.body = NULL;
+        response.body_size = 0;
+        response.suppress_body = true;
+    }
+    return response;
 }
 
 SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc) {
@@ -4727,6 +5229,19 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     if (desc) {
         if (desc->port < 0 || desc->port > UINT16_MAX) {
             sihttp_set_error("invalid server port: %d", desc->port);
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return NULL;
+        }
+        if (desc->cors.enabled &&
+            ((desc->cors.allow_origin && !sihttp_header_valid("Access-Control-Allow-Origin", desc->cors.allow_origin)) ||
+             (desc->cors.allow_methods && !sihttp_header_valid("Access-Control-Allow-Methods", desc->cors.allow_methods)) ||
+             (desc->cors.allow_headers && !sihttp_header_valid("Access-Control-Allow-Headers", desc->cors.allow_headers)))) {
+            sihttp_set_error("invalid CORS header value");
+#ifdef _WIN32
+            WSACleanup();
+#endif
             return NULL;
         }
         port = desc->port;
@@ -4758,7 +5273,15 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
         return NULL;
     }
 
-    sihttp_route_table_init(server->routes);
+    if (sihttp_route_table_init(server->routes) != 0) {
+        free(server->routes);
+        free(server);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        sihttp_set_error("out of memory");
+        return NULL;
+    }
     server->port = (uint16_t)port;
     server->backlog = backlog;
     server->max_requests_per_poll = max_requests_per_poll;
@@ -4774,6 +5297,9 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
                 free(server->routes);
                 free(server);
                 sihttp_set_error("out of memory");
+#ifdef _WIN32
+                WSACleanup();
+#endif
                 return NULL;
             }
             memcpy(server->host, desc->host, host_len + 1);
@@ -4934,7 +5460,12 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
         &req, buffer.data, buffer.len, server->state, server->max_body_bytes
     );
     if (status != 200) {
-        sihttp_send_response(client_fd, sihttp_response_empty(status), &server->cors);
+        sihttp_response_t error_response = sihttp_response_empty(status);
+        if (status == 405) {
+            error_response = sihttp_dispatch_request(server, (sihttp_method_t)-1, &req);
+            if (error_response.status == 404) error_response.status = 405;
+        }
+        sihttp_send_response(client_fd, error_response, &server->cors);
         sihttp_request_internal_fini(&req);
         sihttp_buffer_fini(&buffer);
         return -1;
@@ -4985,6 +5516,7 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
     sihttp_response_t response;
     size_t target_len;
     size_t header_bytes = 0;
+    sihttp_header_state_t header_state = {0};
     char *cursor;
     if (!server || !desc || !desc->path || (desc->body_size && !desc->body) ||
         (desc->header_count && !desc->headers) || desc->header_count > SIHTTP_MAX_HEADERS) {
@@ -5003,7 +5535,7 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
     for (size_t i = 0; i < desc->header_count; i++) {
         size_t name_len;
         size_t value_len;
-        if (!desc->headers[i].name || !desc->headers[i].value) {
+        if (!sihttp_header_valid(desc->headers[i].name, desc->headers[i].value)) {
             sihttp_request_internal_fini(&req);
             return sihttp_response_empty(400);
         }
@@ -5015,6 +5547,10 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
             return sihttp_response_empty(400);
         }
         header_bytes += name_len + value_len + 2;
+        if (header_bytes > SIHTTP_MAX_HEADER_BYTES) {
+            sihttp_request_internal_fini(&req);
+            return sihttp_response_empty(413);
+        }
     }
     if (header_bytes) {
         req.header_storage = malloc(header_bytes);
@@ -5032,14 +5568,26 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
             memcpy(cursor, desc->headers[i].value, n + 1);
             req.headers[i].value = sihttp_trim_header_value(cursor);
             cursor += n + 1;
+            int header_status = sihttp_request_check_header(&header_state,
+                req.headers[i].name, req.headers[i].value);
+            if (header_status != 200) {
+                sihttp_request_internal_fini(&req);
+                return sihttp_response_empty(header_status);
+            }
         }
         req.header_count = desc->header_count;
     }
-    req.public_req.method = sihttp_method_name(desc->method);
+    if (header_state.has_length && header_state.content_length != desc->body_size) {
+        sihttp_request_internal_fini(&req);
+        return sihttp_response_empty(400);
+    }
+    const char *method_name = sihttp_method_name(desc->method);
+    req.public_req.method = method_name ? method_name : "UNKNOWN";
     req.public_req.body = desc->body;
     req.public_req.body_size = desc->body_size;
     req.public_req.state = server->state;
     response = sihttp_dispatch_request(server, desc->method, &req);
+    if (!method_name && response.status == 404) response.status = 405;
     sihttp_response_normalize(&response);
     sihttp_request_internal_fini(&req);
     return response;
@@ -5138,14 +5686,20 @@ SIHTTP_API int sihttp_server_run(sihttp_server_t *server) {
 
 SIHTTP_API void
 sihttp_route_impl(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc) {
+    (void)sihttp_try_route(server, path, desc);
+}
+
+SIHTTP_API bool sihttp_try_route(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc) {
     if (!server || !desc) {
         sihttp_set_error("invalid route descriptor");
-        return;
+        return false;
     }
 
     if (sihttp_route_table_add(server->routes, desc->method, path, desc->callback) != 0) {
         sihttp_set_error("could not add route: %s", path ? path : "(null)");
+        return false;
     }
+    return true;
 }
 
 SIHTTP_API void sihttp_get(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
@@ -5167,6 +5721,14 @@ sihttp_delete(sihttp_server_t *server, const char *path, sihttp_handler_t callba
 
 SIHTTP_API void sihttp_options(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
     sihttp_route(server, path, { .method = SIHTTP_METHOD_OPTIONS, .callback = callback });
+}
+
+SIHTTP_API void sihttp_patch(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
+    sihttp_route(server, path, { .method = SIHTTP_METHOD_PATCH, .callback = callback });
+}
+
+SIHTTP_API void sihttp_head(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
+    sihttp_route(server, path, { .method = SIHTTP_METHOD_HEAD, .callback = callback });
 }
 
 SIHTTP_API char *siformat(const char *fmt, ...) {
@@ -5292,12 +5854,12 @@ static int sihttp_streq_icase(const char *a, const char *b) {
 static char *sihttp_trim(char *str) {
     char *end;
 
-    while (*str && isspace((unsigned char)*str)) {
+    while (*str == ' ' || *str == '\t') {
         str++;
     }
 
     end = str + strlen(str);
-    while (end > str && isspace((unsigned char)end[-1])) {
+    while (end > str && (end[-1] == ' ' || end[-1] == '\t')) {
         end--;
     }
     *end = '\0';
@@ -5306,16 +5868,75 @@ static char *sihttp_trim(char *str) {
 }
 
 static int sihttp_parse_size(const char *value, size_t *out) {
-    char *end = NULL;
-    unsigned long parsed;
-
-    errno = 0;
-    parsed = strtoul(value, &end, 10);
-    if (errno || end == value || *sihttp_trim(end) != '\0' || parsed > SIZE_MAX) {
-        return -1;
+    size_t parsed = 0;
+    if (!*value) return -1;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p < '0' || *p > '9' || parsed > (SIZE_MAX - (*p - '0')) / 10) return -1;
+        parsed = parsed * 10 + (*p - '0');
     }
+    *out = parsed;
+    return 0;
+}
 
-    *out = (size_t)parsed;
+int sihttp_request_check_header(sihttp_header_state_t *state, const char *name, const char *value) {
+    if (!sihttp_header_valid(name, value)) return 400;
+    if (sihttp_streq_icase(name, "Content-Length")) {
+        size_t parsed;
+        if (sihttp_parse_size(value, &parsed) != 0 ||
+            (state->has_length && strcmp(value, state->length_text) != 0)) return 400;
+        state->content_length = parsed;
+        state->length_text = value;
+        state->has_length = 1;
+    }
+    if (sihttp_streq_icase(name, "Transfer-Encoding")) return 501;
+    if (sihttp_streq_icase(name, "Host")) {
+        if (state->has_host || !*value) return 400;
+        state->has_host = 1;
+    }
+    return 200;
+}
+
+static int sihttp_tchar(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
+
+int sihttp_header_valid(const char *name, const char *value) {
+    if (!name || !*name || !value) return 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        if (!sihttp_tchar(*p)) return 0;
+    }
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if ((*p < 32 && *p != '\t') || *p == 127) return 0;
+    }
+    return 1;
+}
+
+static int sihttp_hex(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+int sihttp_url_decode(char *value, int query) {
+    char *out = value;
+    for (char *p = value; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '%') {
+            if (!p[1] || !p[2]) return -1;
+            int hi = sihttp_hex((unsigned char)p[1]);
+            int lo = sihttp_hex((unsigned char)p[2]);
+            if (hi < 0 || lo < 0) return -1;
+            c = (unsigned char)((hi << 4) | lo);
+            p += 2;
+        } else if (c == '+' && query) {
+            c = ' ';
+        }
+        if (c == 0 || c < 32 || c == 127) return -1;
+        *out++ = (char)c;
+    }
+    *out = '\0';
     return 0;
 }
 
@@ -5330,9 +5951,9 @@ static int sihttp_add_pair(sihttp_pair_t *pairs, size_t *count, const char *name
     return 0;
 }
 
-static void sihttp_parse_query(sihttp_request_internal_t *req, char *query) {
+static int sihttp_parse_query(sihttp_request_internal_t *req, char *query) {
     char *cursor = query;
-    while (cursor && *cursor && req->query_count < SIHTTP_MAX_PARAMS) {
+    while (cursor && *cursor) {
         char *next = strchr(cursor, '&');
         char *eq;
 
@@ -5342,13 +5963,14 @@ static void sihttp_parse_query(sihttp_request_internal_t *req, char *query) {
         }
 
         eq = strchr(cursor, '=');
-        if (eq) {
-            *eq = '\0';
-            sihttp_add_pair(req->query, &req->query_count, cursor, eq + 1);
-        }
+        if (eq) *eq++ = '\0';
+        else eq = cursor + strlen(cursor);
+        if (sihttp_url_decode(cursor, 1) != 0 || sihttp_url_decode(eq, 1) != 0 ||
+            sihttp_add_pair(req->query, &req->query_count, cursor, eq) != 0) return -1;
 
         cursor = next;
     }
+    return 0;
 }
 
 void sihttp_request_internal_init(sihttp_request_internal_t *req) {
@@ -5363,14 +5985,22 @@ void sihttp_request_internal_fini(sihttp_request_internal_t *req) {
 
 int sihttp_request_set_target(sihttp_request_internal_t *req, char *target) {
     char *query;
-    if (!target || target[0] != '/') {
+    if (!target || target[0] != '/' || strchr(target, '#')) {
         return -1;
     }
     req->public_req.path = target;
     query = strchr(target, '?');
     if (query) {
         *query++ = '\0';
-        sihttp_parse_query(req, query);
+        if (sihttp_parse_query(req, query) != 0) return -1;
+    }
+    if (strchr(target, '#')) return -1;
+    for (const unsigned char *p = (const unsigned char *)target; *p; p++) {
+        if (*p <= 32 || *p == 127) return -1;
+        if (*p == '%' && (!p[1] || !p[2] || sihttp_hex(p[1]) < 0 || sihttp_hex(p[2]) < 0 ||
+                          (unsigned)((sihttp_hex(p[1]) << 4) | sihttp_hex(p[2])) < 32 ||
+                          (unsigned)((sihttp_hex(p[1]) << 4) | sihttp_hex(p[2])) == 127)) return -1;
+        if (*p == '%') p += 2;
     }
     return 0;
 }
@@ -5391,6 +6021,7 @@ int sihttp_request_add_param(sihttp_request_internal_t *req, const char *name, c
 
     memcpy(req->param_names[req->param_count], name, name_len + 1);
     memcpy(req->param_values[req->param_count], value, value_len + 1);
+    if (sihttp_url_decode(req->param_values[req->param_count], 0) != 0) return -1;
     req->params[req->param_count].name = req->param_names[req->param_count];
     req->params[req->param_count].value = req->param_values[req->param_count];
     req->param_count++;
@@ -5409,9 +6040,10 @@ const char *sihttp_method_name(sihttp_method_t method) {
         return "DELETE";
     case SIHTTP_METHOD_OPTIONS:
         return "OPTIONS";
+    case SIHTTP_METHOD_PATCH: return "PATCH";
+    case SIHTTP_METHOD_HEAD: return "HEAD";
     }
-
-    return "GET";
+    return NULL;
 }
 
 sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
@@ -5435,6 +6067,8 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
         *ok = 1;
         return SIHTTP_METHOD_OPTIONS;
     }
+    if (strcmp(method, "PATCH") == 0) { *ok = 1; return SIHTTP_METHOD_PATCH; }
+    if (strcmp(method, "HEAD") == 0) { *ok = 1; return SIHTTP_METHOD_HEAD; }
 
     *ok = 0;
     return SIHTTP_METHOD_GET;
@@ -5448,7 +6082,9 @@ sihttp_parse_result_t sihttp_request_parse_state_with_limit(
     sihttp_parse_result_t result = { .code = 0, .expected_len = 0 };
     const char *headers_end;
     size_t header_len;
-    size_t content_length = 0;
+    sihttp_header_state_t header_state = {0};
+    int http11 = 0;
+    size_t header_count = 0;
     char *copy;
     char *line;
 
@@ -5474,7 +6110,35 @@ sihttp_parse_result_t sihttp_request_parse_state_with_limit(
     memcpy(copy, data, header_len);
     copy[header_len] = '\0';
 
+    if (memchr(copy, '\0', header_len) || !strstr(copy, "\r\n")) {
+        result.code = 400;
+        free(copy);
+        return result;
+    }
     line = strstr(copy, "\r\n");
+    *line = '\0';
+    {
+        char *method = copy;
+        char *target = strchr(method, ' ');
+        char *version;
+        if (!target || target == method || !(version = strchr(target + 1, ' ')) ||
+            version == target + 1 || strchr(version + 1, ' ') ||
+            (strcmp(version + 1, "HTTP/1.1") != 0 && strcmp(version + 1, "HTTP/1.0") != 0)) {
+            result.code = 400;
+            free(copy);
+            return result;
+        }
+        http11 = strcmp(version + 1, "HTTP/1.1") == 0;
+        *target++ = '\0';
+        *version = '\0';
+        for (const unsigned char *p = (const unsigned char *)method; *p; p++) {
+            if (!sihttp_tchar(*p)) { result.code = 400; free(copy); return result; }
+        }
+        if (*target != '/') { result.code = 400; free(copy); return result; }
+        for (const unsigned char *p = (const unsigned char *)target; *p; p++) {
+            if (*p <= 32 || *p == 127) { result.code = 400; free(copy); return result; }
+        }
+    }
     while (line) {
         char *line_end;
         char *colon;
@@ -5485,41 +6149,40 @@ sihttp_parse_result_t sihttp_request_parse_state_with_limit(
         }
 
         line_end = strstr(line, "\r\n");
-        if (!line_end) {
-            break;
-        }
+        if (!line_end) { result.code = 400; break; }
         *line_end = '\0';
 
         colon = strchr(line, ':');
-        if (colon) {
+        if (!colon || ++header_count > SIHTTP_MAX_HEADERS) { result.code = 400; break; }
+        {
             char *name;
             char *value;
 
             *colon = '\0';
-            name = sihttp_trim(line);
+            name = line;
             value = sihttp_trim(colon + 1);
-            if (sihttp_streq_icase(name, "Content-Length") && sihttp_parse_size(value, &content_length) != 0) {
-                free(copy);
-                result.code = 400;
-                return result;
-            }
+            result.code = sihttp_request_check_header(&header_state, name, value);
+            if (result.code != 200) break;
+            result.code = 0;
         }
 
         line = line_end;
     }
 
     free(copy);
+    if (result.code) return result;
+    if (http11 && !header_state.has_host) { result.code = 400; return result; }
 
-    if (content_length > max_body_bytes) {
+    if (header_state.content_length > max_body_bytes) {
         result.code = 413;
         return result;
     }
 
-    if (content_length > SIZE_MAX - header_len) {
+    if (header_state.content_length > SIZE_MAX - header_len) {
         result.code = 413;
         return result;
     }
-    result.expected_len = header_len + content_length;
+    result.expected_len = header_len + header_state.content_length;
     if (len >= result.expected_len) {
         result.code = 200;
     }
@@ -5626,11 +6289,11 @@ int sihttp_request_parse_with_limit(
     *headers_end = '\0';
 
     sihttp_method_from_name(method, &method_ok);
+    req->public_req.method = method;
     if (!method_ok) {
         return 405;
     }
 
-    req->public_req.method = method;
     req->public_req.body = body;
     req->public_req.body_size = state_result.expected_len - (size_t)(body - req->storage);
     req->public_req.state = state;
@@ -5708,6 +6371,30 @@ SIHTTP_API bool sihttp_query_u32(const sihttp_request_t *req, const char *name, 
     return true;
 }
 
+SIHTTP_API bool sihttp_query_u64(const sihttp_request_t *req, const char *name, uint64_t *out) {
+    return sihttp_parse_u64_strict(sihttp_query(req, name), UINT64_MAX, out);
+}
+
+static bool sihttp_parse_i64_strict(const char *value, int64_t *out) {
+    uint64_t magnitude;
+    bool negative;
+    if (!value || !*value || !out) return false;
+    negative = *value == '-';
+    if (*value == '-' || *value == '+') value++;
+    if (!sihttp_parse_u64_strict(value, negative ? (uint64_t)INT64_MAX + 1 : INT64_MAX, &magnitude)) return false;
+    *out = negative && magnitude == (uint64_t)INT64_MAX + 1 ? INT64_MIN :
+           negative ? -(int64_t)magnitude : (int64_t)magnitude;
+    return true;
+}
+
+SIHTTP_API bool sihttp_path_param_i64(const sihttp_request_t *req, const char *name, int64_t *out) {
+    return sihttp_parse_i64_strict(sihttp_path_param(req, name), out);
+}
+
+SIHTTP_API bool sihttp_query_i64(const sihttp_request_t *req, const char *name, int64_t *out) {
+    return sihttp_parse_i64_strict(sihttp_query(req, name), out);
+}
+
 SIHTTP_API bool sihttp_query_bool(const sihttp_request_t *req, const char *name, bool *out) {
     const char *value = sihttp_query(req, name);
     if (!value || !out) return false;
@@ -5733,7 +6420,89 @@ SIHTTP_API int64_t sihttp_param(const sihttp_request_t *public_req, const char *
 SIHTTP_API void sihttp_response_fini(sihttp_response_t *response) {
     if (!response) return;
     free(response->body);
+    for (size_t i = 0; i < response->header_count; i++) {
+        free((void *)response->headers[i].name);
+        free((void *)response->headers[i].value);
+    }
+    free(response->headers);
     *response = (sihttp_response_t){0};
+}
+
+static int sihttp_header_eq(const char *a, const char *b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a++) != tolower((unsigned char)*b++)) return 0;
+    }
+    return *a == *b;
+}
+
+static int sihttp_managed_header(const char *name) {
+    return sihttp_header_eq(name, "Content-Length") || sihttp_header_eq(name, "Content-Type") ||
+           sihttp_header_eq(name, "Connection") ||
+           sihttp_header_eq(name, "Access-Control-Allow-Origin") ||
+           sihttp_header_eq(name, "Access-Control-Allow-Methods") ||
+           sihttp_header_eq(name, "Access-Control-Allow-Headers");
+}
+
+static char *sihttp_copy_string(const char *text) {
+    size_t len = strlen(text) + 1;
+    char *copy = malloc(len);
+    if (copy) memcpy(copy, text, len);
+    return copy;
+}
+
+static bool sihttp_response_store_header(sihttp_response_t *response, const char *name,
+                                         const char *value, bool replace, bool managed) {
+    if (!response || !sihttp_header_valid(name, value) || (!managed && sihttp_managed_header(name))) return false;
+    char *name_copy = sihttp_copy_string(name);
+    char *value_copy = sihttp_copy_string(value);
+    if (!name_copy || !value_copy) { free(name_copy); free(value_copy); return false; }
+    if (replace) {
+        for (size_t i = 0; i < response->header_count; i++) {
+            if (sihttp_header_eq(response->headers[i].name, name)) {
+                free((void *)response->headers[i].name);
+                free((void *)response->headers[i].value);
+                response->headers[i] = (sihttp_header_t){name_copy, value_copy};
+                for (size_t j = i + 1; j < response->header_count;) {
+                    if (!sihttp_header_eq(response->headers[j].name, name)) { j++; continue; }
+                    free((void *)response->headers[j].name);
+                    free((void *)response->headers[j].value);
+                    memmove(&response->headers[j], &response->headers[j + 1],
+                            (response->header_count - j - 1) * sizeof(*response->headers));
+                    response->header_count--;
+                }
+                return true;
+            }
+        }
+    }
+    if (response->header_count == SIZE_MAX / sizeof(*response->headers)) {
+        free(name_copy); free(value_copy); return false;
+    }
+    sihttp_header_t *headers = realloc(response->headers,
+        (response->header_count + 1) * sizeof(*headers));
+    if (!headers) { free(name_copy); free(value_copy); return false; }
+    response->headers = headers;
+    response->headers[response->header_count++] = (sihttp_header_t){name_copy, value_copy};
+    return true;
+}
+
+SIHTTP_API bool sihttp_response_set_header(sihttp_response_t *response, const char *name, const char *value) {
+    return sihttp_response_store_header(response, name, value, true, false);
+}
+
+SIHTTP_API bool sihttp_response_add_header(sihttp_response_t *response, const char *name, const char *value) {
+    return sihttp_response_store_header(response, name, value, false, false);
+}
+
+bool sihttp_response_set_managed_header(sihttp_response_t *response, const char *name, const char *value) {
+    return sihttp_response_store_header(response, name, value, true, true);
+}
+
+SIHTTP_API const char *sihttp_response_header(const sihttp_response_t *response, const char *name) {
+    if (!response || !name) return NULL;
+    for (size_t i = 0; i < response->header_count; i++) {
+        if (sihttp_header_eq(response->headers[i].name, name)) return response->headers[i].value;
+    }
+    return NULL;
 }
 
 void sihttp_response_normalize(sihttp_response_t *response) {
@@ -5822,17 +6591,23 @@ static int sihttp_send_all(int fd, const char *data, size_t len) {
 }
 
 char *sihttp_build_response(sihttp_response_t response, const sihttp_cors_desc_t *cors, size_t *out_len) {
-    const char *format = "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\n%sConnection: close\r\n\r\n";
+    const char *format = "HTTP/1.1 %d %s\r\nContent-Length: %zu\r\nContent-Type: %s\r\n%s";
     const char *cors_format = "Access-Control-Allow-Origin: %s\r\nAccess-Control-Allow-Methods: %s\r\nAccess-Control-Allow-Headers: %s\r\n";
     char *cors_headers = NULL;
     const char *cors_text = "";
     int header_len;
     char *message;
-    size_t total;
+    size_t total, body_len, content_length;
     sihttp_response_normalize(&response);
+    body_len = response.suppress_body ? 0 : response.body ? response.body_size : 0;
+    content_length = body_len;
+    if (response.suppress_body) {
+        const char *head_length = sihttp_response_header(&response, "Content-Length");
+        if (head_length) content_length = (size_t)strtoull(head_length, NULL, 10);
+    }
     if (cors && cors->enabled) {
         const char *origin = cors->allow_origin ? cors->allow_origin : "*";
-        const char *methods = cors->allow_methods ? cors->allow_methods : "GET, POST, PUT, DELETE, OPTIONS";
+        const char *methods = cors->allow_methods ? cors->allow_methods : "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS";
         const char *headers = cors->allow_headers ? cors->allow_headers : "Content-Type, Authorization";
         int n = snprintf(NULL, 0, cors_format, origin, methods, headers);
         if (n < 0) return NULL;
@@ -5842,19 +6617,48 @@ char *sihttp_build_response(sihttp_response_t response, const sihttp_cors_desc_t
         cors_text = cors_headers;
     }
     header_len = snprintf(NULL, 0, format, response.status, sihttp_status_reason(response.status),
-                          response.body ? response.body_size : 0,
+                          content_length,
                           sihttp_content_type_name(response.content_type), cors_text);
-    if (header_len < 0 || (response.body && response.body_size > SIZE_MAX - (size_t)header_len - 1)) {
+    if (header_len < 0) { free(cors_headers); return NULL; }
+    size_t custom_len = 0;
+    for (size_t i = 0; i < response.header_count; i++) {
+        const char *name = response.headers[i].name;
+        const char *value = response.headers[i].value;
+        if (!sihttp_header_valid(name, value) || sihttp_managed_header(name)) continue;
+        size_t n = strlen(name), v = strlen(value);
+        if (n > SIZE_MAX - custom_len || v > SIZE_MAX - custom_len - n ||
+            4 > SIZE_MAX - custom_len - n - v) {
+            free(cors_headers); return NULL;
+        }
+        custom_len += n + v + 4;
+    }
+    size_t trailer_len = sizeof("Connection: close\r\n\r\n") - 1;
+    if (custom_len > SIZE_MAX - (size_t)header_len ||
+        trailer_len >= SIZE_MAX - (size_t)header_len - custom_len ||
+        body_len > SIZE_MAX - (size_t)header_len - custom_len - trailer_len - 1) {
         free(cors_headers);
         return NULL;
     }
-    total = (size_t)header_len + (response.body ? response.body_size : 0);
+    total = (size_t)header_len + custom_len + trailer_len + body_len;
     message = malloc(total + 1);
     if (message) {
-        snprintf(message, (size_t)header_len + 1, format, response.status,
-                 sihttp_status_reason(response.status), response.body ? response.body_size : 0,
+        int written = snprintf(message, (size_t)header_len + 1, format, response.status,
+                 sihttp_status_reason(response.status), content_length,
                  sihttp_content_type_name(response.content_type), cors_text);
-        if (response.body && response.body_size) memcpy(message + header_len, response.body, response.body_size);
+        char *cursor = message + written;
+        for (size_t i = 0; i < response.header_count; i++) {
+            const char *name = response.headers[i].name;
+            const char *value = response.headers[i].value;
+            if (!sihttp_header_valid(name, value) || sihttp_managed_header(name)) continue;
+            size_t n = strlen(name), v = strlen(value);
+            memcpy(cursor, name, n); cursor += n;
+            memcpy(cursor, ": ", 2); cursor += 2;
+            memcpy(cursor, value, v); cursor += v;
+            memcpy(cursor, "\r\n", 2); cursor += 2;
+        }
+        memcpy(cursor, "Connection: close\r\n\r\n", sizeof("Connection: close\r\n\r\n") - 1);
+        cursor += sizeof("Connection: close\r\n\r\n") - 1;
+        if (body_len) memcpy(cursor, response.body, body_len);
         message[total] = '\0';
         if (out_len) *out_len = total;
     }
@@ -5871,142 +6675,178 @@ int sihttp_send_response(int fd, sihttp_response_t response, const sihttp_cors_d
     return result;
 }
 
-static char *sihttp_strdup(const char *str) {
-    size_t len = strlen(str);
-    char *copy = malloc(len + 1);
-    if (!copy) {
-        return NULL;
+static int sihttp_param_name_valid(const char *name, size_t len) {
+    if (!len || len >= 32 || !(isalpha((unsigned char)name[0]) || name[0] == '_')) return 0;
+    for (size_t i = 1; i < len; i++) {
+        if (!(isalnum((unsigned char)name[i]) || name[i] == '_')) return 0;
     }
-
-    memcpy(copy, str, len + 1);
-    return copy;
+    return 1;
 }
 
-static int
-sihttp_route_path_matches(const char *pattern, const char *path, sihttp_request_internal_t *req) {
-    const char *p = pattern;
-    const char *s = path;
-
-    while (*p && *s) {
-        if (*p == ':') {
-            const char *name_start;
-            const char *value_start;
-            size_t name_len;
-            size_t value_len;
-            char name[32];
-            char value[64];
-            int ok;
-
-            p++;
-            name_start = p;
-            while (*p && *p != '/') {
-                p++;
-            }
-
-            value_start = s;
-            while (*s && *s != '/' && *s != '?') {
-                s++;
-            }
-
-            name_len = (size_t)(p - name_start);
-            value_len = (size_t)(s - value_start);
-            if (name_len == 0 || value_len == 0 || req->param_count >= SIHTTP_MAX_PARAMS) {
-                return 0;
-            }
-
-            if (name_len >= sizeof(name) || value_len >= sizeof(value)) {
-                return 0;
-            }
-            memcpy(name, name_start, name_len);
-            name[name_len] = '\0';
-            memcpy(value, value_start, value_len);
-            value[value_len] = '\0';
-
-            ok = sihttp_request_add_param(req, name, value) == 0;
-            if (!ok) {
-                return 0;
-            }
-        } else if (*p == *s) {
-            p++;
-            s++;
-        } else {
-            return 0;
+static int sihttp_route_compile(sihttp_route_entry_t *entry, const char *path) {
+    size_t len = strlen(path);
+    size_t count = 0;
+    if (!len || path[0] != '/' || strchr(path, '?') || strchr(path, '#')) return -1;
+    if (len > 1) {
+        count = 1;
+        for (size_t i = 1; i < len; i++) {
+            if (path[i] == '/') {
+                if (path[i - 1] == '/' || i == len - 1) return -1;
+                count++;
+            } else if ((unsigned char)path[i] <= 32 || (unsigned char)path[i] == 127) return -1;
         }
     }
+    entry->path = malloc(len + 1);
+    entry->segments = count ? calloc(count, sizeof(*entry->segments)) : NULL;
+    if (!entry->path || (count && !entry->segments)) return -1;
+    memcpy(entry->path, path, len + 1);
+    entry->segment_count = count;
+    const char *cursor = entry->path + 1;
+    size_t param_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *end = strchr(cursor, '/');
+        if (!end) end = entry->path + len;
+        sihttp_route_segment_t *segment = &entry->segments[i];
+        segment->parameter = cursor[0] == ':';
+        segment->text = cursor + segment->parameter;
+        segment->len = (size_t)(end - segment->text);
+        if (segment->parameter) {
+            if (++param_count > SIHTTP_MAX_PARAMS) return -1;
+            if (!sihttp_param_name_valid(segment->text, segment->len)) return -1;
+            for (size_t j = 0; j < i; j++) {
+                sihttp_route_segment_t *prior = &entry->segments[j];
+                if (prior->parameter && prior->len == segment->len &&
+                    memcmp(prior->text, segment->text, segment->len) == 0) return -1;
+            }
+        } else {
+            if (memchr(segment->text, ':', segment->len)) return -1;
+            entry->literal_count++;
+        }
+        cursor = end + 1;
+    }
+    return 0;
+}
 
-    return *p == '\0' && (*s == '\0' || *s == '?');
+static int sihttp_route_path_matches(const sihttp_route_entry_t *entry, const char *path) {
+    if (!path || path[0] != '/') return 0;
+    if (entry->segment_count == 0) return path[1] == '\0';
+    const char *cursor = path + 1;
+    for (size_t i = 0; i < entry->segment_count; i++) {
+        const char *end = strchr(cursor, '/');
+        if (!end) end = cursor + strlen(cursor);
+        size_t len = (size_t)(end - cursor);
+        const sihttp_route_segment_t *segment = &entry->segments[i];
+        if (!len || (!segment->parameter &&
+            (len != segment->len || memcmp(cursor, segment->text, len) != 0))) return 0;
+        if (i + 1 == entry->segment_count) return *end == '\0';
+        if (*end != '/') return 0;
+        cursor = end + 1;
+    }
+    return 0;
 }
 
 int sihttp_route_table_init(sihttp_route_table_t *table) {
     sicore_vec_init(&table->entries, sizeof(sihttp_route_entry_t));
-    return 0;
+    return table->entries.data ? 0 : -1;
 }
 
 void sihttp_route_table_fini(sihttp_route_table_t *table) {
     sihttp_route_entry_t *entries = sicore_vec_data(&table->entries, sihttp_route_entry_t);
-
     for (uint32_t i = 0; i < table->entries.size; i++) {
         free(entries[i].path);
+        free(entries[i].segments);
     }
-
     sicore_vec_fini(&table->entries);
 }
 
-int sihttp_route_table_add(
-    sihttp_route_table_t *table,
-    sihttp_method_t method,
-    const char *path,
-    sihttp_handler_t callback
-) {
-    char *path_copy;
-
-    if (!path || path[0] != '/' || !callback) {
+int sihttp_route_table_add(sihttp_route_table_t *table, sihttp_method_t method,
+                           const char *path, sihttp_handler_t callback) {
+    sihttp_route_entry_t entry = {.method = method, .callback = callback};
+    if (!table || !path || !callback || !sihttp_method_name(method)) return -1;
+    const sihttp_route_entry_t *entries = sicore_vec_data(&table->entries, sihttp_route_entry_t);
+    for (uint32_t i = 0; i < table->entries.size; i++) {
+        if (entries[i].method == method && strcmp(entries[i].path, path) == 0) return -1;
+    }
+    if (sihttp_route_compile(&entry, path) != 0) {
+        free(entry.path);
+        free(entry.segments);
         return -1;
     }
-
-    path_copy = sihttp_strdup(path);
-    if (!path_copy) {
-        return -1;
+    if (table->entries.size == UINT32_MAX) {
+        free(entry.path); free(entry.segments); return -1;
     }
-
-    sihttp_route_entry_t entry = {
-        .method = method,
-        .path = path_copy,
-        .callback = callback,
-    };
-
-    sicore_vec_push(&table->entries, &entry, sizeof(sihttp_route_entry_t));
-
+    if (table->entries.size == table->entries.capacity) {
+        uint32_t capacity = table->entries.capacity;
+        if (capacity > UINT32_MAX / 2) {
+            free(entry.path); free(entry.segments); return -1;
+        }
+#if SIZE_MAX <= UINT32_MAX
+        if (capacity > SIZE_MAX / (2 * sizeof(entry))) {
+            free(entry.path); free(entry.segments); return -1;
+        }
+#endif
+        void *grown = realloc(table->entries.data, (size_t)capacity * 2 * sizeof(entry));
+        if (!grown) { free(entry.path); free(entry.segments); return -1; }
+        table->entries.data = grown;
+        table->entries.capacity = capacity * 2;
+    }
+    ((sihttp_route_entry_t *)table->entries.data)[table->entries.size++] = entry;
     return 0;
 }
 
-sihttp_handler_t sihttp_route_table_match(
-    const sihttp_route_table_t *table,
-    sihttp_method_t method,
-    const char *path,
-    sihttp_request_internal_t *req,
-    int *method_not_allowed
-) {
-    *method_not_allowed = 0;
-
+sihttp_handler_t sihttp_route_table_match_ex(const sihttp_route_table_t *table,
+    sihttp_method_t method, const char *path, sihttp_request_internal_t *req, unsigned *allow_mask) {
     const sihttp_route_entry_t *entries = sicore_vec_data(&table->entries, sihttp_route_entry_t);
-
+    const sihttp_route_entry_t *best = NULL;
+    int best_rank = -1;
+    *allow_mask = 0;
     for (uint32_t i = 0; i < table->entries.size; i++) {
         const sihttp_route_entry_t *entry = &entries[i];
-        size_t saved_count = req->param_count;
-        if (!sihttp_route_path_matches(entry->path, path, req)) {
-            req->param_count = saved_count;
-            continue;
+        if (!sihttp_route_path_matches(entry, path)) continue;
+        *allow_mask |= 1u << entry->method;
+        if (entry->method == SIHTTP_METHOD_GET) *allow_mask |= 1u << SIHTTP_METHOD_HEAD;
+        int rank = entry->method == method ? 2 :
+                   method == SIHTTP_METHOD_HEAD && entry->method == SIHTTP_METHOD_GET ? 1 : 0;
+        if (rank && (rank > best_rank || (rank == best_rank &&
+            entry->literal_count > best->literal_count))) {
+            best = entry;
+            best_rank = rank;
         }
-
-        if (entry->method == method) {
-            return entry->callback;
-        }
-
-        req->param_count = saved_count;
-        *method_not_allowed = 1;
     }
+    if (!best) return NULL;
+    const char *cursor = path + 1;
+    for (size_t i = 0; i < best->segment_count; i++) {
+        const char *end = strchr(cursor, '/');
+        if (!end) end = cursor + strlen(cursor);
+        if (best->segments[i].parameter) {
+            char name[32];
+            size_t name_len = best->segments[i].len;
+            size_t value_len = (size_t)(end - cursor);
+            if (value_len >= sizeof(req->param_values[0])) {
+                req->param_error = 1;
+                return NULL;
+            }
+            char value[sizeof(req->param_values[0])];
+            memcpy(name, best->segments[i].text, name_len);
+            name[name_len] = '\0';
+            memcpy(value, cursor, value_len);
+            value[value_len] = '\0';
+            if (sihttp_request_add_param(req, name, value) != 0) {
+                req->param_error = 1;
+                return NULL;
+            }
+        }
+        cursor = *end ? end + 1 : end;
+    }
+    return best->callback;
+}
 
-    return NULL;
+sihttp_handler_t sihttp_route_table_match(const sihttp_route_table_t *table,
+    sihttp_method_t method, const char *path, sihttp_request_internal_t *req,
+    int *method_not_allowed) {
+    unsigned mask = 0;
+    sihttp_handler_t handler = sihttp_route_table_match_ex(table, method, path, req, &mask);
+    *method_not_allowed = !handler && mask != 0;
+    return handler;
 }
 

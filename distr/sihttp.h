@@ -441,6 +441,104 @@ typedef struct {
     size_t element_count;
 } sireflect_type_info_t;
 
+/* Type graph visits are preorder. A false callback result stops the walk. */
+typedef enum {
+    SIREFLECT_WALK_ROOT,
+    SIREFLECT_WALK_FIELD,
+    SIREFLECT_WALK_ARRAY_ELEMENT,
+    SIREFLECT_WALK_POINTER_TARGET,
+    SIREFLECT_WALK_FUNCTION_RETURN
+} sireflect_walk_relation_t;
+
+typedef struct {
+    sireflect_handle_t type;
+    const sireflect_type_info_t *info;
+    sireflect_walk_relation_t relation;
+    const sireflect_field_info_t *field;
+    sireflect_handle_t parent_type;
+    size_t depth;
+} sireflect_type_visit_t;
+
+typedef bool (*sireflect_type_visitor_t)(const sireflect_type_visit_t *, void *);
+
+typedef enum {
+    SIREFLECT_WALK_FOLLOW_POINTERS = 1u << 0,
+    SIREFLECT_WALK_DEDUPLICATE = 1u << 1
+} sireflect_walk_flag_t;
+
+typedef enum {
+    SIREFLECT_VALUE_ENTER_STRUCT,
+    SIREFLECT_VALUE_LEAVE_STRUCT,
+    SIREFLECT_VALUE_FIELD,
+    SIREFLECT_VALUE_ENTER_ARRAY,
+    SIREFLECT_VALUE_LEAVE_ARRAY,
+    SIREFLECT_VALUE_ARRAY_ELEMENT,
+    SIREFLECT_VALUE_LEAF,
+    SIREFLECT_VALUE_POINTER
+} sireflect_value_event_t;
+
+typedef struct {
+    sireflect_value_event_t event;
+    sireflect_handle_t type;
+    const sireflect_type_info_t *info;
+    const sireflect_field_info_t *field;
+    const void *ptr;
+    size_t index;
+    size_t depth;
+} sireflect_const_value_visit_t;
+
+typedef struct {
+    sireflect_value_event_t event;
+    sireflect_handle_t type;
+    const sireflect_type_info_t *info;
+    const sireflect_field_info_t *field;
+    void *ptr;
+    size_t index;
+    size_t depth;
+} sireflect_value_visit_t;
+
+typedef bool (*sireflect_const_value_visitor_t)(const sireflect_const_value_visit_t *, void *);
+typedef bool (*sireflect_value_visitor_t)(const sireflect_value_visit_t *, void *);
+
+typedef enum {
+    sireflect_category_invalid,
+    sireflect_category_boolean,
+    sireflect_category_integer,
+    sireflect_category_floating,
+    sireflect_category_enum,
+    sireflect_category_struct,
+    sireflect_category_array,
+    sireflect_category_cstring,
+    sireflect_category_pointer,
+    sireflect_category_function_pointer
+} sireflect_category_t;
+
+typedef enum {
+    SIREFLECT_META_STRING,
+    SIREFLECT_META_BOOL,
+    SIREFLECT_META_I64,
+    SIREFLECT_META_U64,
+    SIREFLECT_META_F64
+} sireflect_meta_kind_t;
+
+typedef struct {
+    const char *key;
+    sireflect_meta_kind_t kind;
+    union {
+        const char *string;
+        bool boolean;
+        int64_t i64;
+        uint64_t u64;
+        double f64;
+    } value;
+} sireflect_meta_t;
+
+/* Borrowed view. Its items pointer can change when metadata is added. */
+typedef struct {
+    const sireflect_meta_t *const *items;
+    size_t count;
+} sireflect_metas_t;
+
 typedef struct {
     const char *name;
     const char *fields;
@@ -463,7 +561,8 @@ typedef struct {
  * Use sireflect(name) to register the generated metadata.
  */
 #define SIREFLECT_STRUCT(type_name, ...)                                                           \
-    typedef struct __VA_ARGS__ type_name;                                                          \
+    typedef struct type_name type_name;                                                             \
+    struct type_name __VA_ARGS__;                                                                   \
     SIREFLECT_UNUSED static const sireflect_struct_desc_t sireflect_desc(type_name) = {            \
         .name = #type_name,                                                                        \
         .fields = #__VA_ARGS__,                                                                    \
@@ -607,6 +706,47 @@ SIREFLECT_API int sireflect_field_copy(
     const char *field,
     const void *value
 );
+
+/* Walks a type graph. Pointer targets are followed only with FOLLOW_POINTERS.
+ * Cycles are cut on the active path; DEDUPLICATE visits each handle once.
+ * Callback false returns false without setting an error. */
+SIREFLECT_API bool sireflect_walk_type(sireflect_handle_t root, uint32_t flags,
+    sireflect_type_visitor_t visitor, void *user);
+
+/* Walks actual values. Pointer and function pointer values are never dereferenced.
+ * FOLLOW_POINTERS is invalid for value walks. Callback false stops immediately. */
+SIREFLECT_API bool sireflect_walk_value(sireflect_handle_t type, void *value, uint32_t flags,
+    sireflect_value_visitor_t visitor, void *user);
+SIREFLECT_API bool sireflect_walk_const_value(sireflect_handle_t type, const void *value,
+    uint32_t flags, sireflect_const_value_visitor_t visitor, void *user);
+
+SIREFLECT_API sireflect_category_t sireflect_type_category(sireflect_handle_t type);
+SIREFLECT_API bool sireflect_type_is_numeric_handle(sireflect_handle_t type);
+SIREFLECT_API bool sireflect_type_is_scalar(sireflect_handle_t type);
+SIREFLECT_API bool sireflect_type_is_cstring(sireflect_handle_t type);
+SIREFLECT_API bool sireflect_type_is_integral(sireflect_handle_t type);
+SIREFLECT_API bool sireflect_type_is_floating(sireflect_handle_t type);
+SIREFLECT_API bool sireflect_type_is_function_pointer(sireflect_handle_t type);
+
+SIREFLECT_API const void *sireflect_array_element_ptr(sireflect_handle_t array_type,
+    const void *array, size_t index);
+SIREFLECT_API void *sireflect_array_element_mut_ptr(sireflect_handle_t array_type,
+    void *array, size_t index);
+
+/* Keys and string values are copied. Returned metadata is borrowed until the
+ * final fini; replacing a key updates the same object. */
+SIREFLECT_API bool sireflect_type_set_meta(sireflect_handle_t type, const sireflect_meta_t *meta);
+SIREFLECT_API const sireflect_meta_t *sireflect_type_meta(sireflect_handle_t type,
+    const char *key);
+SIREFLECT_API const sireflect_metas_t *sireflect_type_metas(sireflect_handle_t type);
+SIREFLECT_API bool sireflect_field_set_meta(sireflect_handle_t type, const char *field,
+    const sireflect_meta_t *meta);
+SIREFLECT_API const sireflect_meta_t *sireflect_field_meta(sireflect_handle_t type,
+    const char *field, const char *key);
+SIREFLECT_API const sireflect_metas_t *sireflect_field_metas(sireflect_handle_t type,
+    const char *field);
+
+SIREFLECT_API bool sireflect_enum_value_valid(sireflect_handle_t type, int64_t value);
 
 #ifdef __cplusplus
 }
@@ -886,15 +1026,25 @@ typedef enum {
     SIHTTP_CONTENT_BINARY,
 } sihttp_content_type_t;
 
+typedef struct {
+    const char *name;
+    const char *value;
+} sihttp_header_t;
+
 /* Handler response.
  * status defaults to 200 when set to 0.
  * body must be heap-allocated; the server takes ownership and frees it.
+ * Add application headers with the helpers below; they copy names and values.
+ * Release an in-process result with sihttp_response_fini().
  */
 typedef struct {
     int status;
     char *body;
     size_t body_size;
     sihttp_content_type_t content_type;
+    sihttp_header_t *headers;
+    size_t header_count;
+    bool suppress_body; /* Library-managed HEAD serialization state. */
 } sihttp_response_t;
 
 /* Incoming HTTP request passed to route handlers. */
@@ -915,6 +1065,8 @@ typedef enum {
     SIHTTP_METHOD_PUT,
     SIHTTP_METHOD_DELETE,
     SIHTTP_METHOD_OPTIONS,
+    SIHTTP_METHOD_PATCH,
+    SIHTTP_METHOD_HEAD,
 } sihttp_method_t;
 
 /* Route descriptor used by sihttp_route. */
@@ -922,11 +1074,6 @@ typedef struct {
     sihttp_method_t method;
     sihttp_handler_t callback;
 } sihttp_handler_desc_t;
-
-typedef struct {
-    const char *name;
-    const char *value;
-} sihttp_header_t;
 
 typedef struct {
     bool enabled;
@@ -971,8 +1118,8 @@ SIHTTP_API uint16_t sihttp_server_port(const sihttp_server_t *server);
  * path contains only the path and its optional query string. body is NULL
  * when there is no body. No socket, listen, poll, TCP stream parsing, or HTTP
  * header serialization is performed. The returned response belongs to the
- * caller; release response.body with sihttp_response_fini(). The :name route
- * parameters, sihttp_param(), and sihttp_query() behave as they do over the
+ * caller; release it with sihttp_response_fini(). The :name route
+ * parameters and query values behave as they do over the
  * network. path and body only need to remain valid until this function returns.
  */
 SIHTTP_API sihttp_response_t sihttp_server_dispatch(
@@ -1004,6 +1151,13 @@ SIHTTP_API sihttp_response_t
 sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t *desc);
 
 SIHTTP_API void sihttp_response_fini(sihttp_response_t *response);
+/* Names are case-insensitive. Managed wire headers (Content-Length,
+ * Content-Type, Connection and CORS headers) cannot be set here.
+ * CR/LF and invalid header names are rejected. Empty values are allowed.
+ */
+SIHTTP_API bool sihttp_response_set_header(sihttp_response_t *response, const char *name, const char *value);
+SIHTTP_API bool sihttp_response_add_header(sihttp_response_t *response, const char *name, const char *value);
+SIHTTP_API const char *sihttp_response_header(const sihttp_response_t *response, const char *name);
 SIHTTP_API sihttp_response_t sihttp_response_empty(int status);
 SIHTTP_API sihttp_response_t sihttp_response_text(int status, const char *text);
 SIHTTP_API sihttp_response_t sihttp_response_json(int status, sijson_value_t value);
@@ -1017,19 +1171,28 @@ SIHTTP_API sihttp_response_t sihttp_response_take_binary(int status, void *data,
 
 SIHTTP_API void
 sihttp_route_impl(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc);
+SIHTTP_API bool sihttp_try_route(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc);
 
 SIHTTP_API void sihttp_get(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_post(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_put(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_delete(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_options(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
+SIHTTP_API void sihttp_patch(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
+SIHTTP_API void sihttp_head(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 
-/* Returned request values remain valid during the handler call. */
+/* Returned values remain valid during the handler call. URI decoding is strict:
+ * query '+' means space, path parameter '+' stays '+'. Repeated query names
+ * return the first value; a present empty value is "", absence is NULL.
+ */
 SIHTTP_API const char *sihttp_path_param(const sihttp_request_t *req, const char *name);
 SIHTTP_API bool sihttp_path_param_u32(const sihttp_request_t *req, const char *name, uint32_t *out);
 SIHTTP_API bool sihttp_path_param_u16(const sihttp_request_t *req, const char *name, uint16_t *out);
+SIHTTP_API bool sihttp_path_param_i64(const sihttp_request_t *req, const char *name, int64_t *out);
 SIHTTP_API const char *sihttp_query(const sihttp_request_t *req, const char *name);
 SIHTTP_API bool sihttp_query_u32(const sihttp_request_t *req, const char *name, uint32_t *out);
+SIHTTP_API bool sihttp_query_u64(const sihttp_request_t *req, const char *name, uint64_t *out);
+SIHTTP_API bool sihttp_query_i64(const sihttp_request_t *req, const char *name, int64_t *out);
 SIHTTP_API bool sihttp_query_bool(const sihttp_request_t *req, const char *name, bool *out);
 SIHTTP_API const char *sihttp_header(const sihttp_request_t *req, const char *name);
 /* Legacy numeric path parameter accessor; returns 0 when absent or invalid. */

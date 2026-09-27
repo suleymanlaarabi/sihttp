@@ -23,9 +23,10 @@ typedef struct {
 typedef struct {
     sihttp_request_t public_req;
     char param_names[SIHTTP_MAX_PARAMS][32];
-    char param_values[SIHTTP_MAX_PARAMS][64];
+    char param_values[SIHTTP_MAX_PARAMS][256];
     sihttp_pair_t params[SIHTTP_MAX_PARAMS];
     size_t param_count;
+    int param_error;
     sihttp_pair_t query[SIHTTP_MAX_PARAMS];
     size_t query_count;
     sihttp_pair_t headers[SIHTTP_MAX_HEADERS];
@@ -48,6 +49,15 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok);
 void sihttp_request_internal_init(sihttp_request_internal_t *req);
 void sihttp_request_internal_fini(sihttp_request_internal_t *req);
 int sihttp_request_set_target(sihttp_request_internal_t *req, char *target);
+int sihttp_url_decode(char *value, int query);
+int sihttp_header_valid(const char *name, const char *value);
+typedef struct {
+    size_t content_length;
+    const char *length_text;
+    int has_length;
+    int has_host;
+} sihttp_header_state_t;
+int sihttp_request_check_header(sihttp_header_state_t *state, const char *name, const char *value);
 int sihttp_request_add_param(sihttp_request_internal_t *req, const char *name, const char *value);
 int sihttp_request_parse(
     sihttp_request_internal_t *req,
@@ -70,6 +80,7 @@ int sihttp_request_parse_with_limit(
 );
 
 void sihttp_response_normalize(sihttp_response_t *response);
+bool sihttp_response_set_managed_header(sihttp_response_t *response, const char *name, const char *value);
 char *sihttp_build_response(sihttp_response_t response, const sihttp_cors_desc_t *cors, size_t *out_len);
 int sihttp_send_response(int fd, sihttp_response_t response, const sihttp_cors_desc_t *cors);
 
@@ -89,6 +100,10 @@ sihttp_handler_t sihttp_route_table_match(
     const char *path,
     sihttp_request_internal_t *req,
     int *method_not_allowed
+);
+sihttp_handler_t sihttp_route_table_match_ex(
+    const sihttp_route_table_t *table, sihttp_method_t method, const char *path,
+    sihttp_request_internal_t *req, unsigned *allow_mask
 );
 
 struct sihttp_server_s {

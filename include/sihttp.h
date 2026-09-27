@@ -36,15 +36,25 @@ typedef enum {
     SIHTTP_CONTENT_BINARY,
 } sihttp_content_type_t;
 
+typedef struct {
+    const char *name;
+    const char *value;
+} sihttp_header_t;
+
 /* Handler response.
  * status defaults to 200 when set to 0.
  * body must be heap-allocated; the server takes ownership and frees it.
+ * Add application headers with the helpers below; they copy names and values.
+ * Release an in-process result with sihttp_response_fini().
  */
 typedef struct {
     int status;
     char *body;
     size_t body_size;
     sihttp_content_type_t content_type;
+    sihttp_header_t *headers;
+    size_t header_count;
+    bool suppress_body; /* Library-managed HEAD serialization state. */
 } sihttp_response_t;
 
 /* Incoming HTTP request passed to route handlers. */
@@ -65,6 +75,8 @@ typedef enum {
     SIHTTP_METHOD_PUT,
     SIHTTP_METHOD_DELETE,
     SIHTTP_METHOD_OPTIONS,
+    SIHTTP_METHOD_PATCH,
+    SIHTTP_METHOD_HEAD,
 } sihttp_method_t;
 
 /* Route descriptor used by sihttp_route. */
@@ -72,11 +84,6 @@ typedef struct {
     sihttp_method_t method;
     sihttp_handler_t callback;
 } sihttp_handler_desc_t;
-
-typedef struct {
-    const char *name;
-    const char *value;
-} sihttp_header_t;
 
 typedef struct {
     bool enabled;
@@ -121,8 +128,8 @@ SIHTTP_API uint16_t sihttp_server_port(const sihttp_server_t *server);
  * path contains only the path and its optional query string. body is NULL
  * when there is no body. No socket, listen, poll, TCP stream parsing, or HTTP
  * header serialization is performed. The returned response belongs to the
- * caller; release response.body with sihttp_response_fini(). The :name route
- * parameters, sihttp_param(), and sihttp_query() behave as they do over the
+ * caller; release it with sihttp_response_fini(). The :name route
+ * parameters and query values behave as they do over the
  * network. path and body only need to remain valid until this function returns.
  */
 SIHTTP_API sihttp_response_t sihttp_server_dispatch(
@@ -154,6 +161,13 @@ SIHTTP_API sihttp_response_t
 sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t *desc);
 
 SIHTTP_API void sihttp_response_fini(sihttp_response_t *response);
+/* Names are case-insensitive. Managed wire headers (Content-Length,
+ * Content-Type, Connection and CORS headers) cannot be set here.
+ * CR/LF and invalid header names are rejected. Empty values are allowed.
+ */
+SIHTTP_API bool sihttp_response_set_header(sihttp_response_t *response, const char *name, const char *value);
+SIHTTP_API bool sihttp_response_add_header(sihttp_response_t *response, const char *name, const char *value);
+SIHTTP_API const char *sihttp_response_header(const sihttp_response_t *response, const char *name);
 SIHTTP_API sihttp_response_t sihttp_response_empty(int status);
 SIHTTP_API sihttp_response_t sihttp_response_text(int status, const char *text);
 SIHTTP_API sihttp_response_t sihttp_response_json(int status, sijson_value_t value);
@@ -167,19 +181,28 @@ SIHTTP_API sihttp_response_t sihttp_response_take_binary(int status, void *data,
 
 SIHTTP_API void
 sihttp_route_impl(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc);
+SIHTTP_API bool sihttp_try_route(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc);
 
 SIHTTP_API void sihttp_get(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_post(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_put(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_delete(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 SIHTTP_API void sihttp_options(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
+SIHTTP_API void sihttp_patch(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
+SIHTTP_API void sihttp_head(sihttp_server_t *server, const char *path, sihttp_handler_t callback);
 
-/* Returned request values remain valid during the handler call. */
+/* Returned values remain valid during the handler call. URI decoding is strict:
+ * query '+' means space, path parameter '+' stays '+'. Repeated query names
+ * return the first value; a present empty value is "", absence is NULL.
+ */
 SIHTTP_API const char *sihttp_path_param(const sihttp_request_t *req, const char *name);
 SIHTTP_API bool sihttp_path_param_u32(const sihttp_request_t *req, const char *name, uint32_t *out);
 SIHTTP_API bool sihttp_path_param_u16(const sihttp_request_t *req, const char *name, uint16_t *out);
+SIHTTP_API bool sihttp_path_param_i64(const sihttp_request_t *req, const char *name, int64_t *out);
 SIHTTP_API const char *sihttp_query(const sihttp_request_t *req, const char *name);
 SIHTTP_API bool sihttp_query_u32(const sihttp_request_t *req, const char *name, uint32_t *out);
+SIHTTP_API bool sihttp_query_u64(const sihttp_request_t *req, const char *name, uint64_t *out);
+SIHTTP_API bool sihttp_query_i64(const sihttp_request_t *req, const char *name, int64_t *out);
 SIHTTP_API bool sihttp_query_bool(const sihttp_request_t *req, const char *name, bool *out);
 SIHTTP_API const char *sihttp_header(const sihttp_request_t *req, const char *name);
 /* Legacy numeric path parameter accessor; returns 0 when absent or invalid. */

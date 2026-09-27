@@ -41,9 +41,9 @@ static char sihttp_error_buffer[256];
 
 static char *sihttp_trim_header_value(char *value) {
     char *end;
-    while (*value && isspace((unsigned char)*value)) value++;
+    while (*value == ' ' || *value == '\t') value++;
     end = value + strlen(value);
-    while (end > value && isspace((unsigned char)end[-1])) end--;
+    while (end > value && (end[-1] == ' ' || end[-1] == '\t')) end--;
     *end = '\0';
     return value;
 }
@@ -88,24 +88,59 @@ static sihttp_response_t sihttp_dispatch_request(
     sihttp_method_t method,
     sihttp_request_internal_t *req
 ) {
-    int method_not_allowed = 0;
+    unsigned allow_mask = 0;
     sihttp_handler_t handler;
+    sihttp_response_t response;
 
-    handler = sihttp_route_table_match(
+    handler = sihttp_route_table_match_ex(
         server->routes,
         method,
         req->public_req.path,
         req,
-        &method_not_allowed
+        &allow_mask
     );
     if (!handler) {
+        if (req->param_error) return sihttp_response_empty(400);
         if (method == SIHTTP_METHOD_OPTIONS && server->cors.enabled) {
-            return sihttp_response_empty(204);
+            response = sihttp_response_empty(204);
+            goto finish;
         }
-        return sihttp_response_empty(method_not_allowed ? 405 : 404);
+        if (!allow_mask) {
+            response = sihttp_response_empty(404);
+            goto finish;
+        }
+        response = sihttp_response_empty(405);
+        char allow[64] = {0};
+        const sihttp_method_t order[] = {SIHTTP_METHOD_GET, SIHTTP_METHOD_HEAD,
+            SIHTTP_METHOD_POST, SIHTTP_METHOD_PUT, SIHTTP_METHOD_PATCH,
+            SIHTTP_METHOD_DELETE, SIHTTP_METHOD_OPTIONS};
+        size_t used = 0;
+        for (size_t i = 0; i < sizeof(order) / sizeof(order[0]); i++) {
+            if (!(allow_mask & (1u << order[i]))) continue;
+            const char *name = sihttp_method_name(order[i]);
+            int n = snprintf(allow + used, sizeof(allow) - used, "%s%s", used ? ", " : "", name);
+            used += (size_t)n;
+        }
+        if (!sihttp_response_set_header(&response, "Allow", allow)) response = sihttp_response_empty(500);
+        goto finish;
     }
 
-    return handler(&req->public_req);
+    response = handler(&req->public_req);
+finish:
+    sihttp_response_normalize(&response);
+    if (method == SIHTTP_METHOD_HEAD) {
+        char length[32];
+        snprintf(length, sizeof(length), "%zu", response.body ? response.body_size : 0);
+        if (!sihttp_response_set_managed_header(&response, "Content-Length", length)) {
+            sihttp_response_fini(&response);
+            return sihttp_response_empty(500);
+        }
+        free(response.body);
+        response.body = NULL;
+        response.body_size = 0;
+        response.suppress_body = true;
+    }
+    return response;
 }
 
 SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc) {
@@ -128,6 +163,19 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
     if (desc) {
         if (desc->port < 0 || desc->port > UINT16_MAX) {
             sihttp_set_error("invalid server port: %d", desc->port);
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return NULL;
+        }
+        if (desc->cors.enabled &&
+            ((desc->cors.allow_origin && !sihttp_header_valid("Access-Control-Allow-Origin", desc->cors.allow_origin)) ||
+             (desc->cors.allow_methods && !sihttp_header_valid("Access-Control-Allow-Methods", desc->cors.allow_methods)) ||
+             (desc->cors.allow_headers && !sihttp_header_valid("Access-Control-Allow-Headers", desc->cors.allow_headers)))) {
+            sihttp_set_error("invalid CORS header value");
+#ifdef _WIN32
+            WSACleanup();
+#endif
             return NULL;
         }
         port = desc->port;
@@ -159,7 +207,15 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
         return NULL;
     }
 
-    sihttp_route_table_init(server->routes);
+    if (sihttp_route_table_init(server->routes) != 0) {
+        free(server->routes);
+        free(server);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        sihttp_set_error("out of memory");
+        return NULL;
+    }
     server->port = (uint16_t)port;
     server->backlog = backlog;
     server->max_requests_per_poll = max_requests_per_poll;
@@ -175,6 +231,9 @@ SIHTTP_API sihttp_server_t *sihttp_server_init(const sihttp_server_desc_t *desc)
                 free(server->routes);
                 free(server);
                 sihttp_set_error("out of memory");
+#ifdef _WIN32
+                WSACleanup();
+#endif
                 return NULL;
             }
             memcpy(server->host, desc->host, host_len + 1);
@@ -335,7 +394,12 @@ int sihttp_server_handle_client(sihttp_server_t *server, int client_fd) {
         &req, buffer.data, buffer.len, server->state, server->max_body_bytes
     );
     if (status != 200) {
-        sihttp_send_response(client_fd, sihttp_response_empty(status), &server->cors);
+        sihttp_response_t error_response = sihttp_response_empty(status);
+        if (status == 405) {
+            error_response = sihttp_dispatch_request(server, (sihttp_method_t)-1, &req);
+            if (error_response.status == 404) error_response.status = 405;
+        }
+        sihttp_send_response(client_fd, error_response, &server->cors);
         sihttp_request_internal_fini(&req);
         sihttp_buffer_fini(&buffer);
         return -1;
@@ -386,6 +450,7 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
     sihttp_response_t response;
     size_t target_len;
     size_t header_bytes = 0;
+    sihttp_header_state_t header_state = {0};
     char *cursor;
     if (!server || !desc || !desc->path || (desc->body_size && !desc->body) ||
         (desc->header_count && !desc->headers) || desc->header_count > SIHTTP_MAX_HEADERS) {
@@ -404,7 +469,7 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
     for (size_t i = 0; i < desc->header_count; i++) {
         size_t name_len;
         size_t value_len;
-        if (!desc->headers[i].name || !desc->headers[i].value) {
+        if (!sihttp_header_valid(desc->headers[i].name, desc->headers[i].value)) {
             sihttp_request_internal_fini(&req);
             return sihttp_response_empty(400);
         }
@@ -416,6 +481,10 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
             return sihttp_response_empty(400);
         }
         header_bytes += name_len + value_len + 2;
+        if (header_bytes > SIHTTP_MAX_HEADER_BYTES) {
+            sihttp_request_internal_fini(&req);
+            return sihttp_response_empty(413);
+        }
     }
     if (header_bytes) {
         req.header_storage = malloc(header_bytes);
@@ -433,14 +502,26 @@ sihttp_server_dispatch_ex(sihttp_server_t *server, const sihttp_dispatch_desc_t 
             memcpy(cursor, desc->headers[i].value, n + 1);
             req.headers[i].value = sihttp_trim_header_value(cursor);
             cursor += n + 1;
+            int header_status = sihttp_request_check_header(&header_state,
+                req.headers[i].name, req.headers[i].value);
+            if (header_status != 200) {
+                sihttp_request_internal_fini(&req);
+                return sihttp_response_empty(header_status);
+            }
         }
         req.header_count = desc->header_count;
     }
-    req.public_req.method = sihttp_method_name(desc->method);
+    if (header_state.has_length && header_state.content_length != desc->body_size) {
+        sihttp_request_internal_fini(&req);
+        return sihttp_response_empty(400);
+    }
+    const char *method_name = sihttp_method_name(desc->method);
+    req.public_req.method = method_name ? method_name : "UNKNOWN";
     req.public_req.body = desc->body;
     req.public_req.body_size = desc->body_size;
     req.public_req.state = server->state;
     response = sihttp_dispatch_request(server, desc->method, &req);
+    if (!method_name && response.status == 404) response.status = 405;
     sihttp_response_normalize(&response);
     sihttp_request_internal_fini(&req);
     return response;
@@ -539,14 +620,20 @@ SIHTTP_API int sihttp_server_run(sihttp_server_t *server) {
 
 SIHTTP_API void
 sihttp_route_impl(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc) {
+    (void)sihttp_try_route(server, path, desc);
+}
+
+SIHTTP_API bool sihttp_try_route(sihttp_server_t *server, const char *path, const sihttp_handler_desc_t *desc) {
     if (!server || !desc) {
         sihttp_set_error("invalid route descriptor");
-        return;
+        return false;
     }
 
     if (sihttp_route_table_add(server->routes, desc->method, path, desc->callback) != 0) {
         sihttp_set_error("could not add route: %s", path ? path : "(null)");
+        return false;
     }
+    return true;
 }
 
 SIHTTP_API void sihttp_get(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
@@ -568,4 +655,12 @@ sihttp_delete(sihttp_server_t *server, const char *path, sihttp_handler_t callba
 
 SIHTTP_API void sihttp_options(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
     sihttp_route(server, path, { .method = SIHTTP_METHOD_OPTIONS, .callback = callback });
+}
+
+SIHTTP_API void sihttp_patch(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
+    sihttp_route(server, path, { .method = SIHTTP_METHOD_PATCH, .callback = callback });
+}
+
+SIHTTP_API void sihttp_head(sihttp_server_t *server, const char *path, sihttp_handler_t callback) {
+    sihttp_route(server, path, { .method = SIHTTP_METHOD_HEAD, .callback = callback });
 }

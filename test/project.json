@@ -39,7 +39,10 @@
           "parse_get_query",
           "parse_post_body",
           "headers_and_query",
-          "path_numbers"
+          "path_numbers",
+          "uri_decoding",
+          "malformed_http",
+          "signed_numbers"
         ]
       },
       {
@@ -48,7 +51,8 @@
           "exact",
           "param",
           "method_not_allowed",
-          "multiple_and_rollback"
+          "multiple_and_rollback",
+          "precedence_and_validation"
         ]
       },
       {
@@ -60,7 +64,8 @@
           "cors_headers",
           "binary_keeps_null_bytes",
           "helpers",
-          "status_and_cors"
+          "status_and_cors",
+          "custom_headers"
         ]
       },
       {
@@ -80,7 +85,12 @@
           "dispatch_method_not_allowed",
           "dispatch_features",
           "options_and_cors",
-          "network_body_limit"
+          "network_body_limit",
+          "methods_and_allow",
+          "network_malformed",
+          "dispatch_header_validation",
+          "uri_parity",
+          "try_route_validation"
         ]
       }
     ]

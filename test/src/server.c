@@ -246,7 +246,7 @@ void server_cors_preflight(void) {
     test_assert(strstr(response, "HTTP/1.1 204 No Content\r\n") == response);
     test_assert(strstr(response, "Content-Length: 0\r\n") != NULL);
     test_assert(strstr(response, "Access-Control-Allow-Origin: *\r\n") != NULL);
-    test_assert(strstr(response, "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n") != NULL);
+    test_assert(strstr(response, "Access-Control-Allow-Methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS\r\n") != NULL);
 
     free(response);
     sihttp_server_fini(server);
@@ -436,5 +436,208 @@ void server_network_body_limit(void) {
     wire = server_request(server, "POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nabcd");
     test_assert(strstr(wire, "HTTP/1.1 413 Payload Too Large") == wire);
     free(wire);
+    sihttp_server_fini(server);
+}
+
+static int server_get_calls;
+static sihttp_response_t server_advanced_get(const sihttp_request_t *req) {
+    (void)req;
+    server_get_calls++;
+    sihttp_response_t response = sihttp_response_text(201, "payload");
+    test_assert(sihttp_response_set_header(&response, "ETag", "v1"));
+    return response;
+}
+
+static sihttp_response_t server_advanced_head(const sihttp_request_t *req) {
+    (void)req;
+    return sihttp_response_text(202, "explicit");
+}
+
+void server_methods_and_allow(void) {
+    sihttp_server_t *server = sihttp_server({});
+    test_not_null(server);
+    sihttp_get(server, "/resource", server_advanced_get);
+    sihttp_patch(server, "/resource", server_dispatch_handler);
+    sihttp_get(server, "/explicit", server_advanced_get);
+    sihttp_head(server, "/explicit", server_advanced_head);
+    server_get_calls = 0;
+    sihttp_response_t response = sihttp_server_dispatch(server, SIHTTP_METHOD_HEAD, "/resource", NULL);
+    test_int(response.status, 201);
+    test_null(response.body);
+    test_uint(response.body_size, 0);
+    test_str(sihttp_response_header(&response, "Content-Length"), "7");
+    test_str(sihttp_response_header(&response, "etag"), "v1");
+    test_int(server_get_calls, 1);
+    sihttp_response_fini(&response);
+    char *wire = server_request(server, "HEAD /resource HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 201 Created") == wire);
+    test_assert(strstr(wire, "Content-Length: 7\r\n") != NULL);
+    test_assert(strstr(wire, "ETag: v1\r\n") != NULL);
+    test_str(strstr(wire, "\r\n\r\n") + 4, "");
+    test_int(server_get_calls, 2);
+    free(wire);
+    response = sihttp_server_dispatch(server, SIHTTP_METHOD_HEAD, "/explicit", NULL);
+    test_int(response.status, 202);
+    test_str(sihttp_response_header(&response, "Content-Length"), "8");
+    test_int(server_get_calls, 2);
+    sihttp_response_fini(&response);
+    wire = server_request(server, "HEAD /explicit HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 202 Accepted") == wire);
+    test_assert(strstr(wire, "Content-Length: 8\r\n") != NULL);
+    test_str(strstr(wire, "\r\n\r\n") + 4, "");
+    test_int(server_get_calls, 2);
+    free(wire);
+    response = sihttp_server_dispatch(server, SIHTTP_METHOD_HEAD, "/missing", NULL);
+    test_int(response.status, 404);
+    test_null(response.body);
+    test_str(sihttp_response_header(&response, "Content-Length"), "0");
+    sihttp_response_fini(&response);
+    response = sihttp_server_dispatch(server, SIHTTP_METHOD_PATCH, "/resource", NULL);
+    test_int(response.status, 200);
+    test_str(response.body, "dispatch-ok");
+    sihttp_response_fini(&response);
+    wire = server_request(server, "PATCH /resource HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 200 OK") == wire);
+    free(wire);
+    response = sihttp_server_dispatch(server, SIHTTP_METHOD_POST, "/resource", NULL);
+    test_int(response.status, 405);
+    test_str(sihttp_response_header(&response, "allow"), "GET, HEAD, PATCH");
+    sihttp_response_fini(&response);
+    response = sihttp_server_dispatch(server, (sihttp_method_t)99, "/resource", NULL);
+    test_int(response.status, 405);
+    test_str(sihttp_response_header(&response, "Allow"), "GET, HEAD, PATCH");
+    sihttp_response_fini(&response);
+    wire = server_request(server, "POST /resource HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 405 Method Not Allowed") == wire);
+    test_assert(strstr(wire, "Allow: GET, HEAD, PATCH\r\n") != NULL);
+    free(wire);
+    wire = server_request(server, "BREW /resource HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 405 Method Not Allowed") == wire);
+    test_assert(strstr(wire, "Allow: GET, HEAD, PATCH\r\n") != NULL);
+    free(wire);
+    wire = server_request(server, "POST /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 404 Not Found") == wire);
+    test_assert(strstr(wire, "Allow:") == NULL);
+    free(wire);
+    sihttp_server_fini(server);
+}
+
+void server_network_malformed(void) {
+    sihttp_server_t *server = sihttp_server({});
+    const char *bad[] = {
+        "GET / HTTP/1.1\r\n\r\n",
+        "GET / HTTP/3.0\r\nHost: x\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: x\r\nBad\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: x\r\n Bad: x\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: x\r\nBad Name: x\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        char *wire = server_request(server, bad[i]);
+        test_assert(strstr(wire, "HTTP/1.1 400 Bad Request") == wire);
+        free(wire);
+    }
+    char *wire = server_request(server,
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 501 Not Implemented") == wire);
+    free(wire);
+    sihttp_server_fini(server);
+}
+
+void server_dispatch_header_validation(void) {
+    sihttp_server_t *server = sihttp_server({});
+    sihttp_post(server, "/body", server_dispatch_handler);
+    sihttp_header_t headers[] = {{"Content-Length", "2"}};
+    sihttp_dispatch_desc_t desc = {.method = SIHTTP_METHOD_POST, .path = "/body",
+        .body = "abc", .body_size = 3, .headers = headers, .header_count = 1};
+    sihttp_response_t response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 400);
+    sihttp_response_fini(&response);
+    headers[0].value = "3";
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 200);
+    sihttp_response_fini(&response);
+    headers[0].name = "Transfer-Encoding";
+    headers[0].value = "chunked";
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 501);
+    sihttp_response_fini(&response);
+    headers[0].name = "X-Bad";
+    headers[0].value = "x\r\ny";
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 400);
+    sihttp_response_fini(&response);
+    sihttp_server_fini(server);
+}
+
+static sihttp_response_t server_uri_inspect(const sihttp_request_t *req) {
+    const char *name = sihttp_path_param(req, "name");
+    const char *q = sihttp_query(req, "q");
+    const char *empty = sihttp_query(req, "empty");
+    const char *header = sihttp_header(req, "X-Test");
+    sihttp_response_t response = sihttp_response({.body =
+        siformat("%s|%s|%s|%s|%zu|%.*s", name, q, empty, header,
+                 req->body_size, (int)req->body_size, req->body)});
+    test_assert(sihttp_response_set_header(&response, "Location", "/next"));
+    return response;
+}
+
+void server_uri_parity(void) {
+    sihttp_server_t *server = sihttp_server({.max_body_bytes = 3});
+    sihttp_post(server, "/files/:name", server_uri_inspect);
+    sihttp_header_t headers[] = {{"X-Test", "abc"}};
+    sihttp_dispatch_desc_t desc = {.method = SIHTTP_METHOD_POST,
+        .path = "/files/a%2Fb+z?q=hello%20world&empty&other=%C3%A9",
+        .body = "xyz", .body_size = 3, .headers = headers, .header_count = 1};
+    sihttp_response_t response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 200);
+    test_str(response.body, "a/b+z|hello world||abc|3|xyz");
+    test_str(sihttp_response_header(&response, "location"), "/next");
+    sihttp_response_fini(&response);
+    char *wire = server_request(server,
+        "POST /files/a%2Fb+z?q=hello%20world&empty&other=%C3%A9 HTTP/1.1\r\n"
+        "Host: localhost\r\nX-Test: abc\r\nContent-Length: 3\r\n\r\nxyz");
+    test_assert(strstr(wire, "HTTP/1.1 200 OK") == wire);
+    test_assert(strstr(wire, "Location: /next\r\n") != NULL);
+    test_assert(strstr(wire, "\r\n\r\na/b+z|hello world||abc|3|xyz") != NULL);
+    free(wire);
+    desc.path = "/files/%C3%A9?q=hello+world&empty";
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 200);
+    test_str(response.body, "é|hello world||abc|3|xyz");
+    sihttp_response_fini(&response);
+    wire = server_request(server,
+        "POST /files/%C3%A9?q=hello+world&empty HTTP/1.1\r\n"
+        "Host: localhost\r\nX-Test: abc\r\nContent-Length: 3\r\n\r\nxyz");
+    test_assert(strstr(wire, "\r\n\r\né|hello world||abc|3|xyz") != NULL);
+    free(wire);
+    desc.path = "/files/a%2F?q=%";
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 400);
+    sihttp_response_fini(&response);
+    wire = server_request(server, "POST /files/a%2F?q=% HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    test_assert(strstr(wire, "HTTP/1.1 400 Bad Request") == wire);
+    free(wire);
+    desc.path = "/files/x";
+    desc.body_size = 4;
+    response = sihttp_server_dispatch_ex(server, &desc);
+    test_int(response.status, 413);
+    sihttp_response_fini(&response);
+    wire = server_request(server, "POST /files/x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nxxxx");
+    test_assert(strstr(wire, "HTTP/1.1 413 Payload Too Large") == wire);
+    free(wire);
+    sihttp_server_fini(server);
+}
+
+void server_try_route_validation(void) {
+    sihttp_server_t *server = sihttp_server({});
+    sihttp_handler_desc_t desc = {.method = SIHTTP_METHOD_GET, .callback = server_dispatch_handler};
+    test_assert(sihttp_try_route(server, "/ok/:name", &desc));
+    test_assert(!sihttp_try_route(server, "/ok/:name", &desc));
+    test_assert(!sihttp_try_route(server, "/:x/:x", &desc));
+    test_assert(!sihttp_try_route(server, "bad", &desc));
+    desc.method = SIHTTP_METHOD_POST;
+    test_assert(sihttp_try_route(server, "/ok/:name", &desc));
     sihttp_server_fini(server);
 }

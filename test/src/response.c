@@ -80,7 +80,7 @@ void response_cors_headers(void) {
 
     test_not_null(message);
     test_assert(strstr(message, "Access-Control-Allow-Origin: *\r\n") != NULL);
-    test_assert(strstr(message, "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n") != NULL);
+    test_assert(strstr(message, "Access-Control-Allow-Methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS\r\n") != NULL);
     test_assert(strstr(message, "Access-Control-Allow-Headers: Content-Type, Authorization\r\n") != NULL);
     test_assert(len > 0);
 
@@ -141,4 +141,32 @@ void response_status_and_cors(void) {
     test_assert(strstr(message, "Access-Control-Allow-Origin: https://example.test") != NULL);
     test_assert(strstr(message, "Access-Control-Allow-Methods: GET") != NULL);
     free(message);
+}
+
+void response_custom_headers(void) {
+    sihttp_response_t response = {0};
+    test_assert(sihttp_response_add_header(&response, "Location", "/new"));
+    test_assert(sihttp_response_add_header(&response, "X-Request-Id", "one"));
+    test_assert(sihttp_response_add_header(&response, "x-request-id", "two"));
+    test_uint(response.header_count, 3);
+    test_assert(sihttp_response_set_header(&response, "X-REQUEST-ID", "three"));
+    test_uint(response.header_count, 2);
+    test_str(sihttp_response_header(&response, "location"), "/new");
+    test_str(sihttp_response_header(&response, "x-request-id"), "three");
+    test_assert(sihttp_response_set_header(&response, "ETag", ""));
+    test_str(sihttp_response_header(&response, "etag"), "");
+    test_assert(!sihttp_response_set_header(&response, "Bad\r\nName", "x"));
+    test_assert(!sihttp_response_set_header(&response, "Bad", "x\r\ny"));
+    test_assert(!sihttp_response_set_header(&response, "Content-Length", "99"));
+    size_t len = 0;
+    char *wire = sihttp_build_response(response, NULL, &len);
+    test_not_null(wire);
+    test_assert(strstr(wire, "Location: /new\r\n") != NULL);
+    test_assert(strstr(wire, "X-REQUEST-ID: three\r\n") != NULL);
+    test_assert(strstr(wire, "ETag: \r\n") != NULL);
+    test_assert(strstr(wire, "Content-Length: 0\r\n") != NULL);
+    free(wire);
+    sihttp_response_fini(&response);
+    test_null(response.headers);
+    test_uint(response.header_count, 0);
 }

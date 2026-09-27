@@ -49,12 +49,12 @@ static int sihttp_streq_icase(const char *a, const char *b) {
 static char *sihttp_trim(char *str) {
     char *end;
 
-    while (*str && isspace((unsigned char)*str)) {
+    while (*str == ' ' || *str == '\t') {
         str++;
     }
 
     end = str + strlen(str);
-    while (end > str && isspace((unsigned char)end[-1])) {
+    while (end > str && (end[-1] == ' ' || end[-1] == '\t')) {
         end--;
     }
     *end = '\0';
@@ -63,16 +63,75 @@ static char *sihttp_trim(char *str) {
 }
 
 static int sihttp_parse_size(const char *value, size_t *out) {
-    char *end = NULL;
-    unsigned long parsed;
-
-    errno = 0;
-    parsed = strtoul(value, &end, 10);
-    if (errno || end == value || *sihttp_trim(end) != '\0' || parsed > SIZE_MAX) {
-        return -1;
+    size_t parsed = 0;
+    if (!*value) return -1;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if (*p < '0' || *p > '9' || parsed > (SIZE_MAX - (*p - '0')) / 10) return -1;
+        parsed = parsed * 10 + (*p - '0');
     }
+    *out = parsed;
+    return 0;
+}
 
-    *out = (size_t)parsed;
+int sihttp_request_check_header(sihttp_header_state_t *state, const char *name, const char *value) {
+    if (!sihttp_header_valid(name, value)) return 400;
+    if (sihttp_streq_icase(name, "Content-Length")) {
+        size_t parsed;
+        if (sihttp_parse_size(value, &parsed) != 0 ||
+            (state->has_length && strcmp(value, state->length_text) != 0)) return 400;
+        state->content_length = parsed;
+        state->length_text = value;
+        state->has_length = 1;
+    }
+    if (sihttp_streq_icase(name, "Transfer-Encoding")) return 501;
+    if (sihttp_streq_icase(name, "Host")) {
+        if (state->has_host || !*value) return 400;
+        state->has_host = 1;
+    }
+    return 200;
+}
+
+static int sihttp_tchar(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
+
+int sihttp_header_valid(const char *name, const char *value) {
+    if (!name || !*name || !value) return 0;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        if (!sihttp_tchar(*p)) return 0;
+    }
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
+        if ((*p < 32 && *p != '\t') || *p == 127) return 0;
+    }
+    return 1;
+}
+
+static int sihttp_hex(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+int sihttp_url_decode(char *value, int query) {
+    char *out = value;
+    for (char *p = value; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '%') {
+            if (!p[1] || !p[2]) return -1;
+            int hi = sihttp_hex((unsigned char)p[1]);
+            int lo = sihttp_hex((unsigned char)p[2]);
+            if (hi < 0 || lo < 0) return -1;
+            c = (unsigned char)((hi << 4) | lo);
+            p += 2;
+        } else if (c == '+' && query) {
+            c = ' ';
+        }
+        if (c == 0 || c < 32 || c == 127) return -1;
+        *out++ = (char)c;
+    }
+    *out = '\0';
     return 0;
 }
 
@@ -87,9 +146,9 @@ static int sihttp_add_pair(sihttp_pair_t *pairs, size_t *count, const char *name
     return 0;
 }
 
-static void sihttp_parse_query(sihttp_request_internal_t *req, char *query) {
+static int sihttp_parse_query(sihttp_request_internal_t *req, char *query) {
     char *cursor = query;
-    while (cursor && *cursor && req->query_count < SIHTTP_MAX_PARAMS) {
+    while (cursor && *cursor) {
         char *next = strchr(cursor, '&');
         char *eq;
 
@@ -99,13 +158,14 @@ static void sihttp_parse_query(sihttp_request_internal_t *req, char *query) {
         }
 
         eq = strchr(cursor, '=');
-        if (eq) {
-            *eq = '\0';
-            sihttp_add_pair(req->query, &req->query_count, cursor, eq + 1);
-        }
+        if (eq) *eq++ = '\0';
+        else eq = cursor + strlen(cursor);
+        if (sihttp_url_decode(cursor, 1) != 0 || sihttp_url_decode(eq, 1) != 0 ||
+            sihttp_add_pair(req->query, &req->query_count, cursor, eq) != 0) return -1;
 
         cursor = next;
     }
+    return 0;
 }
 
 void sihttp_request_internal_init(sihttp_request_internal_t *req) {
@@ -120,14 +180,22 @@ void sihttp_request_internal_fini(sihttp_request_internal_t *req) {
 
 int sihttp_request_set_target(sihttp_request_internal_t *req, char *target) {
     char *query;
-    if (!target || target[0] != '/') {
+    if (!target || target[0] != '/' || strchr(target, '#')) {
         return -1;
     }
     req->public_req.path = target;
     query = strchr(target, '?');
     if (query) {
         *query++ = '\0';
-        sihttp_parse_query(req, query);
+        if (sihttp_parse_query(req, query) != 0) return -1;
+    }
+    if (strchr(target, '#')) return -1;
+    for (const unsigned char *p = (const unsigned char *)target; *p; p++) {
+        if (*p <= 32 || *p == 127) return -1;
+        if (*p == '%' && (!p[1] || !p[2] || sihttp_hex(p[1]) < 0 || sihttp_hex(p[2]) < 0 ||
+                          (unsigned)((sihttp_hex(p[1]) << 4) | sihttp_hex(p[2])) < 32 ||
+                          (unsigned)((sihttp_hex(p[1]) << 4) | sihttp_hex(p[2])) == 127)) return -1;
+        if (*p == '%') p += 2;
     }
     return 0;
 }
@@ -148,6 +216,7 @@ int sihttp_request_add_param(sihttp_request_internal_t *req, const char *name, c
 
     memcpy(req->param_names[req->param_count], name, name_len + 1);
     memcpy(req->param_values[req->param_count], value, value_len + 1);
+    if (sihttp_url_decode(req->param_values[req->param_count], 0) != 0) return -1;
     req->params[req->param_count].name = req->param_names[req->param_count];
     req->params[req->param_count].value = req->param_values[req->param_count];
     req->param_count++;
@@ -166,9 +235,10 @@ const char *sihttp_method_name(sihttp_method_t method) {
         return "DELETE";
     case SIHTTP_METHOD_OPTIONS:
         return "OPTIONS";
+    case SIHTTP_METHOD_PATCH: return "PATCH";
+    case SIHTTP_METHOD_HEAD: return "HEAD";
     }
-
-    return "GET";
+    return NULL;
 }
 
 sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
@@ -192,6 +262,8 @@ sihttp_method_t sihttp_method_from_name(const char *method, int *ok) {
         *ok = 1;
         return SIHTTP_METHOD_OPTIONS;
     }
+    if (strcmp(method, "PATCH") == 0) { *ok = 1; return SIHTTP_METHOD_PATCH; }
+    if (strcmp(method, "HEAD") == 0) { *ok = 1; return SIHTTP_METHOD_HEAD; }
 
     *ok = 0;
     return SIHTTP_METHOD_GET;
@@ -205,7 +277,9 @@ sihttp_parse_result_t sihttp_request_parse_state_with_limit(
     sihttp_parse_result_t result = { .code = 0, .expected_len = 0 };
     const char *headers_end;
     size_t header_len;
-    size_t content_length = 0;
+    sihttp_header_state_t header_state = {0};
+    int http11 = 0;
+    size_t header_count = 0;
     char *copy;
     char *line;
 
@@ -231,7 +305,35 @@ sihttp_parse_result_t sihttp_request_parse_state_with_limit(
     memcpy(copy, data, header_len);
     copy[header_len] = '\0';
 
+    if (memchr(copy, '\0', header_len) || !strstr(copy, "\r\n")) {
+        result.code = 400;
+        free(copy);
+        return result;
+    }
     line = strstr(copy, "\r\n");
+    *line = '\0';
+    {
+        char *method = copy;
+        char *target = strchr(method, ' ');
+        char *version;
+        if (!target || target == method || !(version = strchr(target + 1, ' ')) ||
+            version == target + 1 || strchr(version + 1, ' ') ||
+            (strcmp(version + 1, "HTTP/1.1") != 0 && strcmp(version + 1, "HTTP/1.0") != 0)) {
+            result.code = 400;
+            free(copy);
+            return result;
+        }
+        http11 = strcmp(version + 1, "HTTP/1.1") == 0;
+        *target++ = '\0';
+        *version = '\0';
+        for (const unsigned char *p = (const unsigned char *)method; *p; p++) {
+            if (!sihttp_tchar(*p)) { result.code = 400; free(copy); return result; }
+        }
+        if (*target != '/') { result.code = 400; free(copy); return result; }
+        for (const unsigned char *p = (const unsigned char *)target; *p; p++) {
+            if (*p <= 32 || *p == 127) { result.code = 400; free(copy); return result; }
+        }
+    }
     while (line) {
         char *line_end;
         char *colon;
@@ -242,41 +344,40 @@ sihttp_parse_result_t sihttp_request_parse_state_with_limit(
         }
 
         line_end = strstr(line, "\r\n");
-        if (!line_end) {
-            break;
-        }
+        if (!line_end) { result.code = 400; break; }
         *line_end = '\0';
 
         colon = strchr(line, ':');
-        if (colon) {
+        if (!colon || ++header_count > SIHTTP_MAX_HEADERS) { result.code = 400; break; }
+        {
             char *name;
             char *value;
 
             *colon = '\0';
-            name = sihttp_trim(line);
+            name = line;
             value = sihttp_trim(colon + 1);
-            if (sihttp_streq_icase(name, "Content-Length") && sihttp_parse_size(value, &content_length) != 0) {
-                free(copy);
-                result.code = 400;
-                return result;
-            }
+            result.code = sihttp_request_check_header(&header_state, name, value);
+            if (result.code != 200) break;
+            result.code = 0;
         }
 
         line = line_end;
     }
 
     free(copy);
+    if (result.code) return result;
+    if (http11 && !header_state.has_host) { result.code = 400; return result; }
 
-    if (content_length > max_body_bytes) {
+    if (header_state.content_length > max_body_bytes) {
         result.code = 413;
         return result;
     }
 
-    if (content_length > SIZE_MAX - header_len) {
+    if (header_state.content_length > SIZE_MAX - header_len) {
         result.code = 413;
         return result;
     }
-    result.expected_len = header_len + content_length;
+    result.expected_len = header_len + header_state.content_length;
     if (len >= result.expected_len) {
         result.code = 200;
     }
@@ -383,11 +484,11 @@ int sihttp_request_parse_with_limit(
     *headers_end = '\0';
 
     sihttp_method_from_name(method, &method_ok);
+    req->public_req.method = method;
     if (!method_ok) {
         return 405;
     }
 
-    req->public_req.method = method;
     req->public_req.body = body;
     req->public_req.body_size = state_result.expected_len - (size_t)(body - req->storage);
     req->public_req.state = state;
@@ -463,6 +564,30 @@ SIHTTP_API bool sihttp_query_u32(const sihttp_request_t *req, const char *name, 
     if (!sihttp_parse_u64_strict(sihttp_query(req, name), UINT32_MAX, &parsed) || !out) return false;
     *out = (uint32_t)parsed;
     return true;
+}
+
+SIHTTP_API bool sihttp_query_u64(const sihttp_request_t *req, const char *name, uint64_t *out) {
+    return sihttp_parse_u64_strict(sihttp_query(req, name), UINT64_MAX, out);
+}
+
+static bool sihttp_parse_i64_strict(const char *value, int64_t *out) {
+    uint64_t magnitude;
+    bool negative;
+    if (!value || !*value || !out) return false;
+    negative = *value == '-';
+    if (*value == '-' || *value == '+') value++;
+    if (!sihttp_parse_u64_strict(value, negative ? (uint64_t)INT64_MAX + 1 : INT64_MAX, &magnitude)) return false;
+    *out = negative && magnitude == (uint64_t)INT64_MAX + 1 ? INT64_MIN :
+           negative ? -(int64_t)magnitude : (int64_t)magnitude;
+    return true;
+}
+
+SIHTTP_API bool sihttp_path_param_i64(const sihttp_request_t *req, const char *name, int64_t *out) {
+    return sihttp_parse_i64_strict(sihttp_path_param(req, name), out);
+}
+
+SIHTTP_API bool sihttp_query_i64(const sihttp_request_t *req, const char *name, int64_t *out) {
+    return sihttp_parse_i64_strict(sihttp_query(req, name), out);
 }
 
 SIHTTP_API bool sihttp_query_bool(const sihttp_request_t *req, const char *name, bool *out) {

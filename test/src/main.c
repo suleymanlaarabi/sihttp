@@ -17,12 +17,16 @@ void request_parse_get_query(void);
 void request_parse_post_body(void);
 void request_headers_and_query(void);
 void request_path_numbers(void);
+void request_uri_decoding(void);
+void request_malformed_http(void);
+void request_signed_numbers(void);
 
 // Testsuite 'route'
 void route_exact(void);
 void route_param(void);
 void route_method_not_allowed(void);
 void route_multiple_and_rollback(void);
+void route_precedence_and_validation(void);
 
 // Testsuite 'response'
 void response_default_status(void);
@@ -32,6 +36,7 @@ void response_cors_headers(void);
 void response_binary_keeps_null_bytes(void);
 void response_helpers(void);
 void response_status_and_cors(void);
+void response_custom_headers(void);
 
 // Testsuite 'server'
 void server_config(void);
@@ -49,6 +54,11 @@ void server_dispatch_method_not_allowed(void);
 void server_dispatch_features(void);
 void server_options_and_cors(void);
 void server_network_body_limit(void);
+void server_methods_and_allow(void);
+void server_network_malformed(void);
+void server_dispatch_header_validation(void);
+void server_uri_parity(void);
+void server_try_route_validation(void);
 
 bake_test_case siformat_testcases[] = {
     {
@@ -77,6 +87,18 @@ bake_test_case request_testcases[] = {
     {
         "path_numbers",
         request_path_numbers
+    },
+    {
+        "uri_decoding",
+        request_uri_decoding
+    },
+    {
+        "malformed_http",
+        request_malformed_http
+    },
+    {
+        "signed_numbers",
+        request_signed_numbers
     }
 };
 
@@ -96,6 +118,10 @@ bake_test_case route_testcases[] = {
     {
         "multiple_and_rollback",
         route_multiple_and_rollback
+    },
+    {
+        "precedence_and_validation",
+        route_precedence_and_validation
     }
 };
 
@@ -127,6 +153,10 @@ bake_test_case response_testcases[] = {
     {
         "status_and_cors",
         response_status_and_cors
+    },
+    {
+        "custom_headers",
+        response_custom_headers
     }
 };
 
@@ -190,6 +220,26 @@ bake_test_case server_testcases[] = {
     {
         "network_body_limit",
         server_network_body_limit
+    },
+    {
+        "methods_and_allow",
+        server_methods_and_allow
+    },
+    {
+        "network_malformed",
+        server_network_malformed
+    },
+    {
+        "dispatch_header_validation",
+        server_dispatch_header_validation
+    },
+    {
+        "uri_parity",
+        server_uri_parity
+    },
+    {
+        "try_route_validation",
+        server_try_route_validation
     }
 };
 
@@ -206,28 +256,28 @@ static bake_test_suite suites[] = {
         "request",
         NULL,
         NULL,
-        4,
+        7,
         request_testcases
     },
     {
         "route",
         NULL,
         NULL,
-        4,
+        5,
         route_testcases
     },
     {
         "response",
         NULL,
         NULL,
-        7,
+        8,
         response_testcases
     },
     {
         "server",
         NULL,
         NULL,
-        15,
+        20,
         server_testcases
     }
 };
