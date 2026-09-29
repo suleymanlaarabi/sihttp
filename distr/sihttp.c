@@ -2356,6 +2356,7 @@ static inline void sireflect_register_builtin_types(void) {
     add_type(f32, sireflect_kind_f32);
     add_type(f64, sireflect_kind_f64);
     add_type(bool, sireflect_kind_bool);
+    add_named_type(bool, "_Bool", sireflect_kind_bool);
     add_type(char, sireflect_kind_char);
     add_type(ptr, sireflect_kind_ptr);
 
